@@ -10,7 +10,7 @@ class OracledbPlugin extends DatabasePlugin {
 
   start ({ query, connAttrs }) {
     const service = getServiceName(this.config, connAttrs)
-    const url = getUrl(connAttrs.connectString)
+    const url = getUrl(connAttrs ? connAttrs.connectString: '')
 
     this.startSpan('oracle.query', {
       service,
