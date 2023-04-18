@@ -5,15 +5,15 @@ function createWrapExecute (tracer, config) {
     return function executeWithTrace (dbQuery, ...args) {
       const connAttrs = this._dd_connAttrs
       const service = getServiceName(tracer, config, connAttrs)
-      const connectStringObj = new URL('http://' + (connAttrs && connAttrs.connectString || 'localhost'))
+      const connectStringObj = new URL('http://' + (connAttrs ? connAttrs.connectString : 'localhost'))
       const tags = {
         'span.kind': 'client',
         'span.type': 'sql',
         'sql.query': dbQuery,
-        'db.instance': connectStringObj.pathname.substring(1),
-        'db.hostname': connectStringObj.hostname,
+        'db.instance': connectStringObj ? connectStringObj.pathname.substring(1) : '',
+        'db.hostname': connectStringObj ? connectStringObj.hostname : '',
         'db.user': config.user,
-        'db.port': connectStringObj.port,
+        'db.port': connectStringObj ? connectStringObj.port : '1521',
         'resource.name': dbQuery,
         'service.name': service
       }
