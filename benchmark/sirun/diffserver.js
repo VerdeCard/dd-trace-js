@@ -1,5 +1,7 @@
 'use strict'
 
+/* global BigInt */
+
 const express = require('express')
 const path = require('path')
 const fs = require('fs')
@@ -94,22 +96,13 @@ async function getSummary (commitish) {
   let artifacts = await get(artifactsUrl(build), circleHeaders)
   artifacts = JSON.parse(artifacts)
   const artifact = artifacts.find(a => a.path.endsWith('summary.json'))
-
-  // This only happens for older commits.
   if (!artifact) {
     const result = subtractBaselines(getResults(commitish))
     summaryCache[commitish] = result
     return result
   }
 
-  let json = JSON.parse(await get(artifact.url, circleHeaders))
-  if (json.byVersion) {
-    // TODO we want to eventually include all of them, but for now, we can just take the latest one
-    // so that it's compatible with previous commits
-    delete json.byVersion
-    json = json[Object.keys(json).sort((a, b) => Number(b) - Number(a))[0]]
-  }
-  const result = subtractBaselines(json)
+  const result = subtractBaselines(JSON.parse(await get(artifact.url, circleHeaders)))
   summaryCache[commitish] = result
   return result
 }

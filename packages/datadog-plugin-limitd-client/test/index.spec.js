@@ -1,44 +1,43 @@
 'use strict'
 
-const { storage } = require('../../datadog-core')
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   let LimitdClient
   let limitd
+  let tracer
 
   describe('limitd-client', () => {
-    withVersions('limitd-client', 'limitd-client', version => {
-      before(() => {
-        return agent.load('limitd-client')
-      })
-
-      after(() => {
-        return agent.close({ ritmReset: false })
-      })
-
+    withVersions(plugin, 'limitd-client', version => {
       beforeEach(done => {
-        LimitdClient = require(`../../../versions/limitd-client@${version}`).get()
-        limitd = new LimitdClient('limitd://127.0.0.1:9231', () => done())
+        agent.load('limitd-client')
+          .then(() => {
+            tracer = require('../../dd-trace')
+            LimitdClient = require(`../../../versions/limitd-client@${version}`).get()
+            limitd = new LimitdClient('limitd://127.0.0.1:9231', done)
+          })
       })
 
       afterEach(() => {
         limitd.disconnect()
+        return agent.close()
       })
 
       it('should propagate context', done => {
+        if (process.env.DD_CONTEXT_PROPAGATION === 'false') return
+
         const span = {}
 
-        storage.run(span, () => {
+        tracer.scope().activate(span, () => {
           limitd.take('user', 'test', function (err, resp) {
             if (err) return done(err)
 
-            try {
-              expect(storage.getStore()).to.equal(span)
-              done()
-            } catch (e) {
-              done(e)
-            }
+            expect(tracer.scope().active()).to.equal(span)
+
+            done()
           })
         })
       })

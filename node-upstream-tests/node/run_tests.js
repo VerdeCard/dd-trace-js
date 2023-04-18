@@ -39,7 +39,8 @@ const IGNORED_SUITES = [
 
 const TRACING_HEADERS = [
   'x-datadog-trace-id',
-  'x-datadog-parent-id'
+  'x-datadog-parent-id',
+  'x-datadog-sampled'
 ]
 
 const UNEXPECTED_FAILURES = [

@@ -2,55 +2,22 @@
 
 const semver = require('semver')
 const agent = require('../../dd-trace/test/plugins/agent')
-const http = require('http')
-const { expect } = require('chai')
-const proxyquire = require('proxyquire').noPreserveCache()
+const plugin = require('../src')
 
-function createLogServer () {
-  return new Promise((resolve, reject) => {
-    let getLogResolve
-    const server = http.createServer((req, res) => {
-      if (req.url !== '/loglog') {
-        res.end()
-        return
-      }
-      const data = []
-      req.on('data', d => data.push(d))
-      req.on('end', () => {
-        server.log(JSON.parse(Buffer.concat(data)))
-        res.end()
-      })
-    })
-    server.log = meta => {
-      getLogResolve(meta ? meta.dd || (meta.params && meta.params.meta && meta.params.meta.dd) : undefined)
-    }
-
-    server.logPromise = new Promise(resolve => {
-      getLogResolve = resolve
-    })
-
-    server.listen(0, () => {
-      resolve(server)
-    })
-  })
-}
+wrapIt()
 
 describe('Plugin', () => {
   let winston
   let tracer
   let transport
-  let httpTransport
   let log
   let spy
   let span
-  let logServer
 
-  async function setupTest (version, winstonConfiguration) {
+  function setup (version, winstonConfiguration) {
     span = tracer.startSpan('test')
 
-    winston = proxyquire(`../../../versions/winston@${version}`, {}).get()
-
-    logServer = await createLogServer()
+    winston = require(`../../../versions/winston@${version}`).get()
 
     spy = sinon.spy()
 
@@ -63,61 +30,37 @@ describe('Plugin', () => {
     }
 
     Transport.prototype.log = log
-    Transport.prototype.name = 'dd'
 
     transport = new Transport()
-    httpTransport = new winston.transports.Http({
-      host: '127.0.0.1',
-      port: logServer.address().port,
-      path: '/loglog'
-    })
 
     if (winston.configure) {
       const configureBlock = {
-        ...{ transports: [transport, httpTransport] },
+        ...{ transports: [transport] },
         ...winstonConfiguration
       }
 
       winston.configure(configureBlock)
     } else {
       winston.add(Transport)
-      winston.add(winston.transports.Http, {
-        host: '127.0.0.1',
-        port: logServer.address().port,
-        path: '/loglog'
-      })
       winston.remove(winston.transports.Console)
     }
   }
 
   describe('winston', () => {
-    withVersions('winston', 'winston', version => {
+    withVersions(plugin, 'winston', version => {
       beforeEach(() => {
         tracer = require('../../dd-trace')
+        return agent.load('winston')
       })
 
       afterEach(() => {
-        if (!winston.configure) {
-          winston.remove('dd')
-          winston.remove('http')
-          winston.add(winston.transports.Console)
-        }
-      })
-
-      afterEach(() => {
-        return agent.close({ ritmReset: false })
+        return agent.close()
       })
 
       describe('without configuration', () => {
         beforeEach(() => {
-          return agent.load('winston')
+          setup(version)
         })
-
-        beforeEach(() => {
-          return setupTest(version)
-        })
-
-        afterEach(() => logServer.close())
 
         it('should not alter the default behavior', () => {
           const meta = {
@@ -137,17 +80,15 @@ describe('Plugin', () => {
 
       describe('with configuration', () => {
         beforeEach(() => {
-          return agent.load('winston', { logInjection: true })
+          tracer._tracer._logInjection = true
         })
 
         describe('without formatting', () => {
           beforeEach(() => {
-            return setupTest(version)
+            setup(version)
           })
 
-          afterEach(() => logServer.close())
-
-          it('should add the trace identifiers to the default logger', async () => {
+          it('should add the trace identifiers to the default logger', () => {
             const meta = {
               dd: {
                 trace_id: span.context().toTraceId(),
@@ -155,17 +96,16 @@ describe('Plugin', () => {
               }
             }
 
-            tracer.scope().activate(span, async () => {
+            tracer.scope().activate(span, () => {
               winston.info('message')
 
               expect(spy).to.have.been.calledWithMatch(meta.dd)
             })
-            expect(await logServer.logPromise).to.include(meta.dd)
           })
 
-          it('should add the trace identifiers to logger instances', async () => {
+          it('should add the trace identifiers to logger instances', () => {
             const options = {
-              transports: [transport, httpTransport]
+              transports: [transport]
             }
 
             const meta = {
@@ -184,10 +124,9 @@ describe('Plugin', () => {
 
               expect(spy).to.have.been.calledWithMatch(meta.dd)
             })
-            expect(await logServer.logPromise).to.include(meta.dd)
           })
 
-          it('should support errors', async () => {
+          it('should support errors', () => {
             const meta = {
               dd: {
                 trace_id: span.context().toTraceId(),
@@ -204,21 +143,16 @@ describe('Plugin', () => {
               const record = log.firstCall.args[index]
 
               expect(record).to.be.an('error')
-              expect(error).to.not.have.property('dd')
+              expect(record).to.not.have.property('dd')
               expect(spy).to.have.been.calledWithMatch(meta.dd)
             })
-            expect(await logServer.logPromise).to.include(meta.dd)
           })
 
           if (semver.intersects(version, '>=3')) {
-            it('should add the trace identifiers when streaming', async () => {
+            it('should add the trace identifiers when streaming', () => {
               const logger = winston.createLogger({
-                transports: [transport, httpTransport]
+                transports: [transport]
               })
-              const dd = {
-                trace_id: span.context().toTraceId(),
-                span_id: span.context().toSpanId()
-              }
 
               tracer.scope().activate(span, () => {
                 logger.write({
@@ -226,43 +160,13 @@ describe('Plugin', () => {
                   message: 'message'
                 })
 
-                expect(spy).to.have.been.calledWithMatch(dd)
+                expect(spy).to.have.been.calledWithMatch({
+                  trace_id: span.context().toTraceId(),
+                  span_id: span.context().toSpanId()
+                })
               })
-              expect(await logServer.logPromise).to.include(dd)
             })
           }
-
-          it('should not overwrite any existing "dd" property', async () => {
-            tracer.scope().activate(span, () => {
-              const meta = {
-                dd: 'something else'
-              }
-              winston.log('info', 'test', meta)
-              expect(meta.dd).to.equal('something else')
-
-              expect(spy).to.have.been.calledWithMatch('something else')
-            })
-            expect(await logServer.logPromise).to.include('something else')
-          })
-
-          // New versions clone the meta object so it's always extensible.
-          if (semver.intersects(version, '<3')) {
-            it('should not add "dd" property to non-extensible objects', async () => {
-              tracer.scope().activate(span, () => {
-                const meta = {}
-                Object.preventExtensions(meta)
-                winston.log('info', 'test', meta)
-                expect(meta.dd).to.be.undefined
-
-                expect(spy).to.have.been.calledWith()
-              })
-              expect(await logServer.logPromise).to.be.undefined
-            })
-          }
-
-          it('should skip injection without a store', async () => {
-            expect(() => winston.info('message')).to.not.throw()
-          })
         })
 
         describe('with splat formatting', () => {
@@ -271,15 +175,13 @@ describe('Plugin', () => {
               const splatConfiguration = {
                 format: winston.format.combine(...[winston.format.splat(), winston.format.json()])
               }
-              return setupTest(version, splatConfiguration)
+              setup(version, splatConfiguration)
             } else {
-              return setupTest(version)
+              setup(version)
             }
           })
 
-          afterEach(() => logServer.close())
-
-          it('should ensure interpolated logs are persisted', async () => {
+          it('should ensure interpolated logs are persisted', () => {
             const base = 'test'
             const extra = 'message'
             const interpolatedLog = base + ` ${extra}`
@@ -305,7 +207,6 @@ describe('Plugin', () => {
 
               expect(spy).to.have.been.calledWithMatch(meta.dd)
             })
-            expect(await logServer.logPromise).to.include(meta.dd)
           })
         })
       })

@@ -1,14 +1,12 @@
 'use strict'
 
-require('../../setup/tap')
-
-const { expect } = require('chai')
-
 const URL = require('url').URL
 
 describe('Exporter', () => {
   let url
   let flushInterval
+  let Scheduler
+  let scheduler
   let Exporter
   let exporter
   let Writer
@@ -20,34 +18,22 @@ describe('Exporter', () => {
     url = 'www.example.com'
     flushInterval = 1000
     span = {}
+    scheduler = {
+      start: sinon.spy(),
+      reset: sinon.spy()
+    }
     writer = {
       append: sinon.spy(),
       flush: sinon.spy(),
       setUrl: sinon.spy()
     }
     prioritySampler = {}
+    Scheduler = sinon.stub().returns(scheduler)
     Writer = sinon.stub().returns(writer)
 
     Exporter = proxyquire('../src/exporters/agent', {
+      './scheduler': Scheduler,
       './writer': Writer
-    })
-  })
-
-  it('should pass computed stats header through to writer', () => {
-    const stats = { enabled: true }
-    exporter = new Exporter({ url, flushInterval, stats }, prioritySampler)
-    expect(Writer).to.have.been.calledWithMatch({
-      headers: {
-        'Datadog-Client-Computed-Stats': 'yes'
-      }
-    })
-  })
-
-  it('should support IPv6', () => {
-    const stats = { enabled: true }
-    exporter = new Exporter({ hostname: '::1', flushInterval, stats }, prioritySampler)
-    expect(Writer).to.have.been.calledWithMatch({
-      url: new URL('http://[::1]')
     })
   })
 
@@ -56,21 +42,13 @@ describe('Exporter', () => {
       exporter = new Exporter({ url, flushInterval }, prioritySampler)
     })
 
-    it('should not flush if export has not been called', (done) => {
+    it('should schedule flushing after the configured interval', () => {
+      writer.length = 0
       exporter = new Exporter({ url, flushInterval }, prioritySampler)
-      setTimeout(() => {
-        expect(writer.flush).not.to.have.been.called
-        done()
-      }, flushInterval + 100)
-    })
+      Scheduler.firstCall.args[0]()
 
-    it('should flush after the configured interval if a payload has been exported', (done) => {
-      exporter = new Exporter({ url, flushInterval }, prioritySampler)
-      exporter.export([{}])
-      setTimeout(() => {
-        expect(writer.flush).to.have.been.called
-        done()
-      }, flushInterval + 100)
+      expect(scheduler.start).to.have.been.called
+      expect(writer.flush).to.have.been.called
     })
 
     describe('export', () => {

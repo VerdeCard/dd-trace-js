@@ -2,27 +2,30 @@
 
 const Tracer = require('./opentracing/tracer')
 const tags = require('../../../ext/tags')
-const Scope = require('./scope')
-const { storage } = require('../../datadog-core')
+const scopes = require('../../../ext/scopes')
+const getScope = require('./scope')
 const { isError } = require('./util')
 const { setStartupLogConfig } = require('./startup-log')
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
 
 const SPAN_TYPE = tags.SPAN_TYPE
 const RESOURCE_NAME = tags.RESOURCE_NAME
 const SERVICE_NAME = tags.SERVICE_NAME
-const MEASURED = tags.MEASURED
+const ANALYTICS = tags.ANALYTICS
+const NOOP = scopes.NOOP
 
 class DatadogTracer extends Tracer {
   constructor (config) {
     super(config)
 
-    this._scope = new Scope()
+    const Scope = getScope(config.scope)
+
+    this._scopeManager = getScopeManager(config)
+    this._scope = new Scope(config)
     setStartupLogConfig(config)
   }
 
   trace (name, options, fn) {
-    options = Object.assign({
+    options = Object.assign({}, {
       childOf: this.scope().active()
     }, options)
 
@@ -45,15 +48,11 @@ class DatadogTracer extends Tracer {
       const result = this.scope().activate(span, () => fn(span))
 
       if (result && typeof result.then === 'function') {
-        return result.then(
-          value => {
-            span.finish()
-            return value
-          },
+        result.then(
+          () => span.finish(),
           err => {
             addError(span, err)
             span.finish()
-            throw err
           }
         )
       } else {
@@ -72,10 +71,6 @@ class DatadogTracer extends Tracer {
     const tracer = this
 
     return function () {
-      const store = storage.getStore()
-
-      if (store && store.noop) return fn.apply(this, arguments)
-
       let optionsObj = options
       if (typeof optionsObj === 'function' && typeof fn === 'function') {
         optionsObj = optionsObj.apply(this, arguments)
@@ -108,8 +103,16 @@ class DatadogTracer extends Tracer {
     this._exporter.setUrl(url)
   }
 
+  scopeManager () {
+    return this._scopeManager
+  }
+
   scope () {
     return this._scope
+  }
+
+  currentSpan () {
+    return this.scope().active()
   }
 
   getRumData () {
@@ -128,9 +131,9 @@ class DatadogTracer extends Tracer {
 function addError (span, error) {
   if (isError(error)) {
     span.addTags({
-      [ERROR_TYPE]: error.name,
-      [ERROR_MESSAGE]: error.message,
-      [ERROR_STACK]: error.stack
+      'error.type': error.name,
+      'error.msg': error.message,
+      'error.stack': error.stack
     })
   }
 }
@@ -142,9 +145,21 @@ function addTags (span, options) {
   if (options.service) tags[SERVICE_NAME] = options.service
   if (options.resource) tags[RESOURCE_NAME] = options.resource
 
-  tags[MEASURED] = options.measured
+  tags[ANALYTICS] = options.analytics
 
   span.addTags(tags)
+}
+
+function getScopeManager (config) {
+  let ScopeManager
+
+  if (config.scope === NOOP) {
+    ScopeManager = require('./scope/noop/scope_manager')
+  } else {
+    ScopeManager = require('./scope/scope_manager')
+  }
+
+  return new ScopeManager()
 }
 
 module.exports = DatadogTracer

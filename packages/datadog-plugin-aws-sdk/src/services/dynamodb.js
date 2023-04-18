@@ -1,10 +1,6 @@
 'use strict'
 
-const BaseAwsSdkPlugin = require('../base')
-
-class DynamoDb extends BaseAwsSdkPlugin {
-  static get id () { return 'dynamodb' }
-
+class DynamoDb {
   generateTags (params, operation, response) {
     const tags = {}
 

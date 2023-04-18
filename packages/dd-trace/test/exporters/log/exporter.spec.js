@@ -1,7 +1,5 @@
 'use strict'
 
-require('../../setup/tap')
-
 describe('LogExporter', () => {
   let Exporter
   let exporter

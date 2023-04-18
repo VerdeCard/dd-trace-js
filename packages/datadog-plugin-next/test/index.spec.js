@@ -4,89 +4,75 @@
 
 const axios = require('axios')
 const getPort = require('get-port')
-const { execSync, spawn } = require('child_process')
+const { execSync } = require('child_process')
+const { parse } = require('url')
 const agent = require('../../dd-trace/test/plugins/agent')
-const { writeFileSync } = require('fs')
-const { satisfies } = require('semver')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', function () {
-  let server
+  let next
+  let app
+  let listener
   let port
 
   describe('next', () => {
-    withVersions('next', 'next', version => {
-      const startServer = withConfig => {
-        before(async () => {
-          port = await getPort()
-
-          return agent.load('next')
+    withVersions(plugin, 'next', version => {
+      const setup = config => {
+        before(() => {
+          return agent.load('next', config)
         })
 
-        before(function (done) {
-          const cwd = __dirname
+        after(() => {
+          listener.close()
+          return agent.close()
+        })
 
-          server = spawn('node', ['server'], {
-            cwd,
+        before(async function () {
+          this.timeout(120 * 1000) // Webpack is very slow and builds on every test run
+
+          const { createServer } = require('http')
+
+          // building in-process makes tests fail for an unknown reason
+          execSync('node build', {
+            cwd: __dirname,
             env: {
-              ...process.env,
-              VERSION: version,
-              PORT: port,
-              DD_TRACE_AGENT_PORT: agent.server.address().port,
-              WITH_CONFIG: withConfig
-            }
+              version,
+              // needed for webpack 5
+              NODE_PATH: [
+                `${__dirname}/../../../versions/next@${version}/node_modules`,
+                `${__dirname}/../../../versions/node_modules`
+              ].join(':')
+            },
+            stdio: ['pipe', 'ignore', 'pipe']
           })
 
-          server.once('error', done)
-          server.stdout.once('data', () => done())
-          server.stderr.on('data', chunk => process.stderr.write(chunk))
-          server.stdout.on('data', chunk => process.stdout.write(chunk))
+          next = require(`../../../versions/next@${version}`).get()
+          app = next({ dir: __dirname, dev: false, quiet: true })
+
+          const handle = app.getRequestHandler()
+
+          await app.prepare()
+
+          listener = createServer((req, res) => {
+            const parsedUrl = parse(req.url, true)
+
+            handle(req, res, parsedUrl)
+          })
         })
 
-        after(async function () {
-          this.timeout(5000)
-          server.kill()
-          await axios.get(`http://localhost:${port}/api/hello/world`).catch(() => {})
-          await agent.close({ ritmReset: false })
+        before(done => {
+          getPort()
+            .then(_port => {
+              port = _port
+              listener.listen(port, 'localhost', () => done())
+            })
         })
       }
 
-      before(async function () {
-        this.timeout(120 * 1000) // Webpack is very slow and builds on every test run
-
-        const cwd = __dirname
-        const nodules = `${__dirname}/../../../versions/next@${version}/node_modules`
-        const pkg = require(`${__dirname}/../../../versions/next@${version}/package.json`)
-
-        delete pkg.workspaces
-
-        execSync(`cp -R '${nodules}' ./`, { cwd })
-
-        writeFileSync(`${__dirname}/package.json`, JSON.stringify(pkg, null, 2))
-
-        // building in-process makes tests fail for an unknown reason
-        execSync('yarn exec next build', {
-          cwd,
-          env: {
-            ...process.env,
-            version
-          },
-          stdio: ['pipe', 'ignore', 'pipe']
-        })
-      })
-
-      after(function () {
-        this.timeout(5000)
-        const files = [
-          'package.json',
-          'node_modules',
-          '.next'
-        ]
-        const paths = files.map(file => `${__dirname}/${file}`)
-        execSync(`rm -rf ${paths.join(' ')}`)
-      })
-
       describe('without configuration', () => {
-        startServer()
+        setup()
 
         describe('for api routes', () => {
           it('should do automatic instrumentation', done => {
@@ -95,13 +81,12 @@ describe('Plugin', function () {
                 const spans = traces[0]
 
                 expect(spans[0]).to.have.property('name', 'next.request')
-                expect(spans[0]).to.have.property('service', 'test')
+                expect(spans[0]).to.have.property('service', 'test-next')
                 expect(spans[0]).to.have.property('type', 'web')
                 expect(spans[0]).to.have.property('resource', 'GET /api/hello/[name]')
                 expect(spans[0].meta).to.have.property('span.kind', 'server')
                 expect(spans[0].meta).to.have.property('http.method', 'GET')
                 expect(spans[0].meta).to.have.property('http.status_code', '200')
-                expect(spans[0].meta).to.have.property('component', 'next')
               })
               .then(done)
               .catch(done)
@@ -109,28 +94,6 @@ describe('Plugin', function () {
             axios
               .get(`http://localhost:${port}/api/hello/world`)
               .catch(done)
-          })
-
-          const pathTests = [
-            ['/api/hello', '/api/hello'],
-            ['/api/hello/world', '/api/hello/[name]'],
-            ['/api/hello/other', '/api/hello/other']
-          ]
-          pathTests.forEach(([url, expectedPath]) => {
-            it(`should infer the corrrect resource path (${expectedPath})`, done => {
-              agent
-                .use(traces => {
-                  const spans = traces[0]
-
-                  expect(spans[0]).to.have.property('resource', `GET ${expectedPath}`)
-                })
-                .then(done)
-                .catch(done)
-
-              axios
-                .get(`http://localhost:${port}${url}`)
-                .catch(done)
-            })
           })
 
           it('should propagate context', done => {
@@ -149,40 +112,18 @@ describe('Plugin', function () {
                 const spans = traces[0]
 
                 expect(spans[0]).to.have.property('name', 'next.request')
-                expect(spans[0]).to.have.property('service', 'test')
+                expect(spans[0]).to.have.property('service', 'test-next')
                 expect(spans[0]).to.have.property('type', 'web')
+                expect(spans[0]).to.have.property('resource', 'GET /404')
                 expect(spans[0].meta).to.have.property('span.kind', 'server')
                 expect(spans[0].meta).to.have.property('http.method', 'GET')
                 expect(spans[0].meta).to.have.property('http.status_code', '404')
-                expect(spans[0].meta).to.have.property('component', 'next')
               })
               .then(done)
               .catch(done)
 
             axios
               .get(`http://localhost:${port}/api/missing`)
-              .catch(() => {})
-          })
-
-          it('should handle invalid catch all parameters', done => {
-            agent
-              .use(traces => {
-                const spans = traces[0]
-
-                expect(spans[0]).to.have.property('name', 'next.request')
-                expect(spans[0]).to.have.property('service', 'test')
-                expect(spans[0]).to.have.property('type', 'web')
-                expect(spans[0]).to.have.property('resource', 'GET /_error')
-                expect(spans[0].meta).to.have.property('span.kind', 'server')
-                expect(spans[0].meta).to.have.property('http.method', 'GET')
-                expect(spans[0].meta).to.have.property('http.status_code', '400')
-                expect(spans[0].meta).to.have.property('component', 'next')
-              })
-              .then(done)
-              .catch(done)
-
-            axios
-              .get(`http://localhost:${port}/api/invalid/%ff`)
               .catch(() => {})
           })
         })
@@ -194,13 +135,12 @@ describe('Plugin', function () {
                 const spans = traces[0]
 
                 expect(spans[0]).to.have.property('name', 'next.request')
-                expect(spans[0]).to.have.property('service', 'test')
+                expect(spans[0]).to.have.property('service', 'test-next')
                 expect(spans[0]).to.have.property('type', 'web')
                 expect(spans[0]).to.have.property('resource', 'GET /hello/[name]')
                 expect(spans[0].meta).to.have.property('span.kind', 'server')
                 expect(spans[0].meta).to.have.property('http.method', 'GET')
                 expect(spans[0].meta).to.have.property('http.status_code', '200')
-                expect(spans[0].meta).to.have.property('component', 'next')
               })
               .then(done)
               .catch(done)
@@ -210,43 +150,18 @@ describe('Plugin', function () {
               .catch(done)
           })
 
-          const pkg = require(`${__dirname}/../../../versions/next@${version}/node_modules/next/package.json`)
-
-          const pathTests = [
-            ['/hello', '/hello'],
-            ['/hello/world', '/hello/[name]'],
-            ['/hello/other', '/hello/other'],
-            ['/error/not_found', '/error/not_found', satisfies(pkg.version, '>=11') ? 404 : 500],
-            ['/error/get_server_side_props', '/error/get_server_side_props', 500]
-          ]
-          pathTests.forEach(([url, expectedPath, statusCode]) => {
-            it(`should infer the corrrect resource (${expectedPath})`, done => {
-              agent
-                .use(traces => {
-                  const spans = traces[0]
-
-                  expect(spans[0]).to.have.property('resource', `GET ${expectedPath}`)
-                  expect(spans[0].meta).to.have.property('http.status_code', `${statusCode || 200}`)
-                })
-                .then(done)
-                .catch(done)
-
-              axios.get(`http://localhost:${port}${url}`)
-            })
-          })
-
           it('should handle pages not found', done => {
             agent
               .use(traces => {
                 const spans = traces[0]
 
                 expect(spans[0]).to.have.property('name', 'next.request')
-                expect(spans[0]).to.have.property('service', 'test')
+                expect(spans[0]).to.have.property('service', 'test-next')
                 expect(spans[0]).to.have.property('type', 'web')
+                expect(spans[0]).to.have.property('resource', 'GET /404')
                 expect(spans[0].meta).to.have.property('span.kind', 'server')
                 expect(spans[0].meta).to.have.property('http.method', 'GET')
                 expect(spans[0].meta).to.have.property('http.status_code', '404')
-                expect(spans[0].meta).to.have.property('component', 'next')
               })
               .then(done)
               .catch(done)
@@ -256,65 +171,31 @@ describe('Plugin', function () {
               .catch(() => {})
           })
         })
-
-        describe('for static files', () => {
-          it('should do automatic instrumentation', done => {
-            agent
-              .use(traces => {
-                const spans = traces[0]
-
-                expect(spans[0]).to.have.property('name', 'next.request')
-                expect(spans[0]).to.have.property('service', 'test')
-                expect(spans[0]).to.have.property('type', 'web')
-                expect(spans[0]).to.have.property('resource', 'GET')
-                expect(spans[0].meta).to.have.property('span.kind', 'server')
-                expect(spans[0].meta).to.have.property('http.method', 'GET')
-                expect(spans[0].meta).to.have.property('http.status_code', '200')
-                expect(spans[0].meta).to.have.property('component', 'next')
-              })
-              .then(done)
-              .catch(done)
-
-            axios
-              .get(`http://localhost:${port}/test.txt`)
-              .catch(done)
-          })
-        })
-
-        describe('when an error happens', () => {
-          it('should not die', done => {
-            agent
-              .use(_traces => { })
-              .then(done)
-              .catch(done)
-
-            axios
-              .get(`http://localhost:${port}/api/error/boom`)
-              .catch((response) => {
-                expect(response.statusCode).to.eql(500)
-              })
-          })
-        })
       })
 
       describe('with configuration', () => {
-        startServer(true)
+        const config = {}
 
-        it('should execute the hook and validate the status', done => {
+        before(() => {
+          config.hooks = {
+            request: sinon.spy()
+          }
+        })
+
+        setup(config)
+
+        it('should execute the hook', done => {
           agent
             .use(traces => {
               const spans = traces[0]
 
               expect(spans[0]).to.have.property('name', 'next.request')
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-next')
               expect(spans[0]).to.have.property('type', 'web')
               expect(spans[0]).to.have.property('resource', 'GET /api/hello/[name]')
-              expect(spans[0]).to.have.property('error', 1)
               expect(spans[0].meta).to.have.property('span.kind', 'server')
               expect(spans[0].meta).to.have.property('http.method', 'GET')
               expect(spans[0].meta).to.have.property('http.status_code', '200')
-              expect(spans[0].meta).to.have.property('foo', 'bar')
-              expect(spans[0].meta).to.have.property('component', 'next')
             })
             .then(done)
             .catch(done)

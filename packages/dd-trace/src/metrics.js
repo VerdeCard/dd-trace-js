@@ -2,13 +2,12 @@
 
 // TODO: capture every second and flush every 10 seconds
 
-const { URL, format } = require('url')
 const v8 = require('v8')
+const path = require('path')
 const os = require('os')
 const Client = require('./dogstatsd')
 const log = require('./log')
 const Histogram = require('./histogram')
-const { performance } = require('perf_hooks')
 
 const INTERVAL = 10 * 1000
 
@@ -21,7 +20,6 @@ let cpuUsage
 let gauges
 let counters
 let histograms
-let elu
 
 reset()
 
@@ -31,11 +29,6 @@ module.exports = {
 
     Object.keys(config.tags)
       .filter(key => typeof config.tags[key] === 'string')
-      .filter(key => {
-        // Skip runtime-id unless enabled as cardinality may be too high
-        if (key !== 'runtime-id') return true
-        return (config.experimental && config.experimental.runtimeId)
-      })
       .forEach(key => {
         // https://docs.datadoghq.com/tagging/#defining-tags
         const value = config.tags[key].replace(/[^a-z0-9_:./-]/ig, '_')
@@ -44,30 +37,18 @@ module.exports = {
       })
 
     try {
-      nativeMetrics = require('@datadog/native-metrics')
+      nativeMetrics = require('node-gyp-build')(path.join(__dirname, '..', '..', '..'))
       nativeMetrics.start()
     } catch (e) {
       log.error(e)
       nativeMetrics = null
     }
 
-    const clientConfig = {
+    client = new Client({
       host: config.dogstatsd.hostname,
       port: config.dogstatsd.port,
       tags
-    }
-
-    if (config.url) {
-      clientConfig.metricsProxyUrl = config.url
-    } else if (config.port) {
-      clientConfig.metricsProxyUrl = new URL(format({
-        protocol: 'http:',
-        hostname: config.hostname || 'localhost',
-        port: config.port
-      }))
-    }
-
-    client = new Client(clientConfig)
+    })
 
     time = process.hrtime()
 
@@ -261,21 +242,6 @@ function captureHistograms () {
   })
 }
 
-/**
- * Gathers and reports Event Loop Utilization (ELU) since last run
- *
- * ELU is a measure of how busy the event loop is, like running JavaScript or
- * waiting on *Sync functions. The value is between 0 (idle) and 1 (exhausted).
- *
- * performance.eventLoopUtilization available in Node.js >= v14.10, >= v12.19, >= v16
- */
-const captureELU = ('eventLoopUtilization' in performance) ? () => {
-  // if elu is undefined (first run) the measurement is from start of process
-  elu = performance.eventLoopUtilization(elu)
-
-  client.gauge('runtime.node.event_loop.utilization', elu.utilization)
-} : () => {}
-
 function captureCommonMetrics () {
   captureMemoryUsage()
   captureProcess()
@@ -283,7 +249,6 @@ function captureCommonMetrics () {
   captureGauges()
   captureCounters()
   captureHistograms()
-  captureELU()
 }
 
 function captureNativeMetrics () {
@@ -312,6 +277,9 @@ function captureNativeMetrics () {
     }
   })
 
+  client.gauge('runtime.node.spans.finished', stats.spans.total.finished)
+  client.gauge('runtime.node.spans.unfinished', stats.spans.total.unfinished)
+
   for (let i = 0, l = spaces.length; i < l; i++) {
     const tags = [`heap_space:${spaces[i].space_name}`]
 
@@ -319,6 +287,18 @@ function captureNativeMetrics () {
     client.gauge('runtime.node.heap.used_size.by.space', spaces[i].space_used_size, tags)
     client.gauge('runtime.node.heap.available_size.by.space', spaces[i].space_available_size, tags)
     client.gauge('runtime.node.heap.physical_size.by.space', spaces[i].physical_space_size, tags)
+  }
+
+  if (stats.spans.operations) {
+    const operations = stats.spans.operations
+
+    Object.keys(operations.finished).forEach(name => {
+      client.gauge('runtime.node.spans.finished.by.name', operations.finished[name], [`span_name:${name}`])
+    })
+
+    Object.keys(operations.unfinished).forEach(name => {
+      client.gauge('runtime.node.spans.unfinished.by.name', operations.unfinished[name], [`span_name:${name}`])
+    })
   }
 }
 

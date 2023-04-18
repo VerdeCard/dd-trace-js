@@ -1,8 +1,6 @@
 'use strict'
 
-require('./setup/tap')
-
-const Span = require('../src/noop/span')
+const Span = require('opentracing').Span
 
 describe('NoopTracer', () => {
   let NoopTracer
@@ -34,6 +32,12 @@ describe('NoopTracer', () => {
       const fn = () => {}
 
       expect(tracer.wrap('test', {}, fn)).to.equal(fn)
+    })
+  })
+
+  describe('currentSpan', () => {
+    it('should return null', () => {
+      expect(tracer.currentSpan()).to.be.null
     })
   })
 

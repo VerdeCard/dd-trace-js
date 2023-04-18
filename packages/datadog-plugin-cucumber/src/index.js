@@ -1,142 +1,153 @@
-'use strict'
+const { relative } = require('path')
 
-const CiPlugin = require('../../dd-trace/src/plugins/ci_plugin')
-const { storage } = require('../../datadog-core')
+const { SAMPLING_RULE_DECISION } = require('../../dd-trace/src/constants')
 
 const {
-  TEST_SKIP_REASON,
+  TEST_TYPE,
+  TEST_NAME,
+  TEST_SUITE,
   TEST_STATUS,
-  finishAllTraceSpans,
-  getTestSuitePath,
-  getTestSuiteCommonTags,
-  addIntelligentTestRunnerSpanTags
+  CI_APP_ORIGIN,
+  ERROR_MESSAGE,
+  getTestEnvironmentMetadata,
+  finishAllTraceSpans
 } = require('../../dd-trace/src/plugins/util/test')
-const { RESOURCE_NAME } = require('../../../ext/tags')
-const { COMPONENT, ERROR_MESSAGE } = require('../../dd-trace/src/constants')
 
-class CucumberPlugin extends CiPlugin {
-  static get id () {
-    return 'cucumber'
-  }
-
-  constructor (...args) {
-    super(...args)
-
-    this.sourceRoot = process.cwd()
-
-    this.addSub('ci:cucumber:session:finish', ({ status, isSuitesSkipped, testCodeCoverageLinesTotal }) => {
-      const { isSuitesSkippingEnabled, isCodeCoverageEnabled } = this.itrConfig || {}
-      addIntelligentTestRunnerSpanTags(
-        this.testSessionSpan,
-        this.testModuleSpan,
-        { isSuitesSkipped, isSuitesSkippingEnabled, isCodeCoverageEnabled, testCodeCoverageLinesTotal }
-      )
-
-      this.testSessionSpan.setTag(TEST_STATUS, status)
-      this.testModuleSpan.setTag(TEST_STATUS, status)
-      this.testModuleSpan.finish()
-      this.testSessionSpan.finish()
-      finishAllTraceSpans(this.testSessionSpan)
-
-      this.itrConfig = null
-      this.tracer._exporter.flush()
-    })
-
-    this.addSub('ci:cucumber:test-suite:start', (testSuiteFullPath) => {
-      const testSuiteMetadata = getTestSuiteCommonTags(
-        this.command,
-        this.frameworkVersion,
-        getTestSuitePath(testSuiteFullPath, this.sourceRoot),
-        'cucumber'
-      )
-      this.testSuiteSpan = this.tracer.startSpan('cucumber.test_suite', {
-        childOf: this.testModuleSpan,
-        tags: {
-          [COMPONENT]: this.constructor.id,
-          ...this.testEnvironmentMetadata,
-          ...testSuiteMetadata
-        }
-      })
-    })
-
-    this.addSub('ci:cucumber:test-suite:finish', status => {
-      this.testSuiteSpan.setTag(TEST_STATUS, status)
-      this.testSuiteSpan.finish()
-    })
-
-    this.addSub('ci:cucumber:test-suite:code-coverage', ({ coverageFiles, suiteFile }) => {
-      if (!this.itrConfig || !this.itrConfig.isCodeCoverageEnabled) {
-        return
-      }
-      const relativeCoverageFiles = [...coverageFiles, suiteFile]
-        .map(filename => getTestSuitePath(filename, this.sourceRoot))
-
-      const formattedCoverage = {
-        traceId: this.testSuiteSpan.context()._traceId,
-        spanId: this.testSuiteSpan.context()._spanId,
-        files: relativeCoverageFiles
-      }
-
-      this.tracer._exporter.exportCoverage(formattedCoverage)
-    })
-
-    this.addSub('ci:cucumber:test:start', ({ testName, fullTestSuite }) => {
-      const store = storage.getStore()
-      const testSuite = getTestSuitePath(fullTestSuite, this.sourceRoot)
-      const testSpan = this.startTestSpan(testName, testSuite)
-
-      this.enter(testSpan, store)
-    })
-
-    this.addSub('ci:cucumber:test-step:start', ({ resource }) => {
-      const store = storage.getStore()
-      const childOf = store ? store.span : store
-      const span = this.tracer.startSpan('cucumber.step', {
-        childOf,
-        tags: {
-          [COMPONENT]: this.constructor.id,
-          'cucumber.step': resource,
-          [RESOURCE_NAME]: resource
-        }
-      })
-      this.enter(span, store)
-    })
-
-    this.addSub('ci:cucumber:test:finish', ({ isStep, status, skipReason, errorMessage }) => {
-      const span = storage.getStore().span
-      const statusTag = isStep ? 'step.status' : TEST_STATUS
-
-      span.setTag(statusTag, status)
-
-      if (skipReason) {
-        span.setTag(TEST_SKIP_REASON, skipReason)
-      }
-
-      if (errorMessage) {
-        span.setTag(ERROR_MESSAGE, errorMessage)
-      }
-
-      span.finish()
-      if (!isStep) {
-        finishAllTraceSpans(span)
-      }
-    })
-
-    this.addSub('ci:cucumber:error', (err) => {
-      if (err) {
-        const span = storage.getStore().span
-        span.setTag('error', err)
-      }
-    })
-  }
-
-  startTestSpan (testName, testSuite) {
-    return super.startTestSpan(
-      testName,
-      testSuite,
-      this.testSuiteSpan
-    )
+function setStatusFromResult (span, result, tag) {
+  if (result.status === 1) {
+    span.setTag(tag, 'pass')
+  } else if (result.status === 2) {
+    span.setTag(tag, 'skip')
+    span.setTag(ERROR_MESSAGE, 'skipped')
+  } else if (result.status === 4) {
+    span.setTag(tag, 'skip')
+    span.setTag(ERROR_MESSAGE, 'not implemented')
+  } else {
+    span.setTag(tag, 'fail')
+    span.setTag(ERROR_MESSAGE, result.message)
   }
 }
 
-module.exports = CucumberPlugin
+function setStatusFromResultLatest (span, result, tag) {
+  if (result.status === 'PASSED') {
+    span.setTag(tag, 'pass')
+  } else if (result.status === 'SKIPPED' || result.status === 'PENDING' || result.status === 'UNDEFINED') {
+    span.setTag(tag, 'skip')
+    span.setTag(ERROR_MESSAGE, result.message || 'skipped')
+  } else {
+    span.setTag(tag, 'fail')
+    span.setTag(ERROR_MESSAGE, result.message)
+  }
+}
+
+function createWrapRun (tracer, testEnvironmentMetadata, getTestSuiteName, setStatus) {
+  return function wrapRun (run) {
+    return function handleRun () {
+      const testName = this.pickle.name
+      const testSuite = getTestSuiteName(this.pickle.uri)
+
+      const commonSpanTags = {
+        [TEST_TYPE]: 'test',
+        [TEST_NAME]: testName,
+        [TEST_SUITE]: testSuite,
+        [SAMPLING_RULE_DECISION]: 1,
+        ...testEnvironmentMetadata
+      }
+
+      return tracer.trace(
+        'cucumber.test',
+        {
+          type: 'test',
+          resource: testName,
+          tags: commonSpanTags
+        },
+        (testSpan) => {
+          testSpan.context()._trace.origin = CI_APP_ORIGIN
+          const promise = run.apply(this, arguments)
+          promise.then(() => {
+            setStatus(testSpan, this.getWorstStepResult(), TEST_STATUS)
+          }).finally(() => {
+            finishAllTraceSpans(testSpan)
+          })
+          return promise
+        }
+      )
+    }
+  }
+}
+
+function createWrapRunStep (tracer, getResourceName, setStatus) {
+  return function wrapRunStep (runStep) {
+    return function handleRunStep () {
+      const resource = getResourceName(arguments[0])
+      return tracer.trace(
+        'cucumber.step',
+        { resource, tags: { 'cucumber.step': resource } },
+        (span) => {
+          const promise = runStep.apply(this, arguments)
+          promise.then((result) => {
+            setStatus(span, result, 'step.status')
+          })
+          return promise
+        }
+      )
+    }
+  }
+}
+
+module.exports = [
+  {
+    name: '@cucumber/cucumber',
+    versions: ['7.0.0 - 7.2.1'],
+    file: 'lib/runtime/pickle_runner.js',
+    patch (PickleRunner, tracer) {
+      const testEnvironmentMetadata = getTestEnvironmentMetadata('cucumber')
+      const sourceRoot = process.cwd()
+      const getTestSuiteName = (pickleUri) => {
+        return relative(sourceRoot, pickleUri)
+      }
+      const pl = PickleRunner.default
+      this.wrap(
+        pl.prototype,
+        'run',
+        createWrapRun(tracer, testEnvironmentMetadata, getTestSuiteName, setStatusFromResult)
+      )
+      const getResourceName = (testStep) => {
+        return testStep.isHook ? 'hook' : testStep.pickleStep.text
+      }
+      this.wrap(pl.prototype, 'runStep', createWrapRunStep(tracer, getResourceName, setStatusFromResult))
+    },
+    unpatch (PickleRunner) {
+      const pl = PickleRunner.default
+      this.unwrap(pl.prototype, 'run')
+      this.unwrap(pl.prototype, 'runStep')
+    }
+  },
+  {
+    name: '@cucumber/cucumber',
+    versions: ['>=7.3.0'],
+    file: 'lib/runtime/test_case_runner.js',
+    patch (TestCaseRunner, tracer) {
+      const testEnvironmentMetadata = getTestEnvironmentMetadata('cucumber')
+      const sourceRoot = process.cwd()
+      const getTestSuiteName = (pickleUri) => {
+        return relative(sourceRoot, pickleUri)
+      }
+      const pl = TestCaseRunner.default
+      this.wrap(
+        pl.prototype,
+        'run',
+        createWrapRun(tracer, testEnvironmentMetadata, getTestSuiteName, setStatusFromResultLatest)
+      )
+      const getResourceName = (testStep) => {
+        return testStep.text
+      }
+      this.wrap(pl.prototype, 'runStep', createWrapRunStep(tracer, getResourceName, setStatusFromResultLatest))
+    },
+    unpatch (TestCaseRunner) {
+      const pl = TestCaseRunner.default
+      this.unwrap(pl.prototype, 'run')
+      this.unwrap(pl.prototype, 'runStep')
+    }
+  }
+]

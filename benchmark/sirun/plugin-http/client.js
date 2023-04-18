@@ -24,10 +24,4 @@ function request (url) {
   })
 }
 
-let url = `http://localhost:${port}/`
-
-if (Number(process.env.CLIENT_LONG_QUERYSTRING)) {
-  url += '?' + 'token=secret&'.repeat(100) + 'a'.repeat(1500)
-}
-
-request(url)
+request(`http://localhost:${port}/`)

@@ -1,11 +1,13 @@
 'use strict'
 
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
 const semver = require('semver')
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
 
 const MSSQL_USERNAME = 'sa'
 const MSSQL_PASSWORD = 'DD_HUNTER2'
+
+wrapIt()
 
 describe('Plugin', () => {
   let tds
@@ -13,7 +15,7 @@ describe('Plugin', () => {
   let connection
   let connectionIsClosed
 
-  withVersions('tedious', 'tedious', version => {
+  withVersions(plugin, 'tedious', version => {
     beforeEach(() => {
       tracer = require('../../dd-trace')
     })
@@ -28,7 +30,7 @@ describe('Plugin', () => {
       })
 
       afterEach(() => {
-        return agent.close({ ritmReset: false })
+        return agent.close()
       })
 
       beforeEach((done) => {
@@ -71,51 +73,47 @@ describe('Plugin', () => {
         }
       })
 
-      describe('with tedious disabled', () => {
-        beforeEach(() => {
-          tracer.use('tedious', false)
-        })
-
-        afterEach(() => {
-          tracer.use('tedious', true)
-        })
-
-        it('should successfully finish a valid query', done => {
-          const query = 'SELECT 1 + 1 AS solution'
-
-          const request = new tds.Request(query, (err) => {
-            if (err) return done(err)
-            done()
-          })
-          connection.execSql(request)
-        })
-      })
-
       it('should run the Request callback in the parent context', done => {
+        if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
         const span = tracer.startSpan('test')
+        const request = new tds.Request('SELECT 1 + 1 AS solution', (err) => {
+          expect(tracer.scope().active()).to.equal(span)
+          done(err)
+        })
 
         tracer.scope().activate(span, () => {
-          const request = new tds.Request('SELECT 1 + 1 AS solution', (err) => {
-            expect(tracer.scope().active()).to.equal(span)
-            done(err)
-          })
           connection.execSql(request)
         })
       })
 
       it('should run the Request event listeners in the parent context', done => {
+        if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
         const span = tracer.startSpan('test')
+        const request = new tds.Request('SELECT 1 + 1 AS solution', (err) => {
+          if (err) done(err)
+        })
 
         tracer.scope().activate(span, () => {
-          const request = new tds.Request('SELECT 1 + 1 AS solution', (err) => {
-            if (err) done(err)
-          })
           request.on('requestCompleted', () => {
             expect(tracer.scope().active()).to.equal(span)
             done()
           })
-          connection.execSql(request)
         })
+        connection.execSql(request)
+      })
+
+      it('should run the Connection event listeners in the parent context', done => {
+        if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+        const span = tracer.startSpan('test')
+
+        tracer.scope().activate(span, () => {
+          connection.on('end', () => {
+            expect(tracer.scope().active()).to.equal(span)
+            connectionIsClosed = true
+            done()
+          })
+        })
+        connection.close()
       })
 
       it('should do automatic instrumentation', done => {
@@ -133,7 +131,7 @@ describe('Plugin', () => {
             expect(traces[0][0].meta).to.have.property('db.type', 'mssql')
             expect(traces[0][0].meta).to.have.property('out.host', 'localhost')
             expect(traces[0][0].meta).to.have.property('span.kind', 'client')
-            expect(traces[0][0].metrics).to.have.property('network.destination.port', 1433)
+            expect(traces[0][0].metrics).to.have.property('out.port', 1433)
           })
 
         const request = new tds.Request(query, (err) => {
@@ -263,10 +261,9 @@ describe('Plugin', () => {
 
         agent
           .use(traces => {
-            expect(traces[0][0].meta).to.have.property(ERROR_TYPE, error.name)
-            expect(traces[0][0].meta).to.have.property(ERROR_STACK, error.stack)
-            expect(traces[0][0].meta).to.have.property(ERROR_MESSAGE, error.message)
-            expect(traces[0][0].meta).to.have.property('component', 'tedious')
+            expect(traces[0][0].meta).to.have.property('error.type', error.name)
+            expect(traces[0][0].meta).to.have.property('error.stack', error.stack)
+            expect(traces[0][0].meta).to.have.property('error.msg', error.message)
           })
           .then(done)
           .catch(done)
@@ -285,10 +282,9 @@ describe('Plugin', () => {
         agent
           .use(traces => {
             expect(error.message).to.equal('Canceled.')
-            expect(traces[0][0].meta).to.have.property(ERROR_TYPE, error.name)
-            expect(traces[0][0].meta).to.have.property(ERROR_STACK, error.stack)
-            expect(traces[0][0].meta).to.have.property(ERROR_MESSAGE, error.message)
-            expect(traces[0][0].meta).to.have.property('component', 'tedious')
+            expect(traces[0][0].meta).to.have.property('error.type', error.name)
+            expect(traces[0][0].meta).to.have.property('error.stack', error.stack)
+            expect(traces[0][0].meta).to.have.property('error.msg', error.message)
           })
           .then(done)
           .catch(done)
@@ -332,6 +328,7 @@ describe('Plugin', () => {
 
           it('should handle bulkload requests', done => {
             const bulkLoad = buildBulkLoad()
+            bulkLoad.addRow({ num: 5 })
 
             agent
               .use(traces => {
@@ -341,10 +338,10 @@ describe('Plugin', () => {
               .then(done)
               .catch(done)
 
-            connection.execBulkLoad(bulkLoad, [{ num: 5 }])
+            connection.execBulkLoad(bulkLoad)
           })
 
-          if (semver.intersects(version, '>=4.2.0') && !semver.intersects(version, '>=14')) {
+          if (semver.intersects(version, '>=4.2.0')) {
             it('should handle streaming BulkLoad requests', done => {
               const bulkLoad = buildBulkLoad()
               const rowStream = bulkLoad.getRowStream()

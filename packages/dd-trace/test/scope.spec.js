@@ -1,169 +1,48 @@
 'use strict'
 
-require('./setup/tap')
-
-const Span = require('opentracing').Span
-const Scope = require('../src/scope')
-
-describe('Scope', () => {
-  let scope
-  let span
+describe('getScope', () => {
+  let getScope
+  let versionDescriptor
+  const ASYNC_RESOURCE = { name: 'async_resource' }
+  const ASYNC_HOOKS = { name: 'async_hooks' }
 
   beforeEach(() => {
-    scope = new Scope()
-    span = new Span()
+    versionDescriptor = Reflect.getOwnPropertyDescriptor(process.versions, 'node')
   })
 
-  describe('active()', () => {
-    it('should return null by default', () => {
-      expect(scope.active()).to.be.null
-    })
+  afterEach(() => {
+    Reflect.defineProperty(process.versions, 'node', versionDescriptor)
   })
 
-  describe('activate()', () => {
-    it('should return the value returned by the callback', () => {
-      expect(scope.activate(span, () => 'test')).to.equal('test')
-    })
-
-    it('should preserve the surrounding scope', () => {
-      expect(scope.active()).to.be.null
-
-      scope.activate(span, () => {})
-
-      expect(scope.active()).to.be.null
-    })
-
-    it('should support an invalid callback', () => {
-      expect(() => { scope.activate(span, 'invalid') }).to.not.throw(Error)
-    })
-
-    it('should activate the span on the current scope', () => {
-      expect(scope.active()).to.be.null
-
-      scope.activate(span, () => {
-        expect(scope.active()).to.equal(span)
+  it('should default to AsyncLocalStorage on supported versions, and async_hooks on unsupported versions', () => {
+    function assertVersion (version, als) {
+      Reflect.defineProperty(process.versions, 'node', {
+        value: version,
+        configurable: true
       })
-
-      expect(scope.active()).to.be.null
-    })
-
-    it('should persist through setTimeout', done => {
-      scope.activate(span, () => {
-        setTimeout(() => {
-          expect(scope.active()).to.equal(span)
-          done()
-        }, 0)
+      getScope = proxyquire('../src/scope', {
+        './scope/async_resource': ASYNC_RESOURCE,
+        './scope/async_hooks': ASYNC_HOOKS
       })
-    })
-
-    it('should persist through setImmediate', done => {
-      scope.activate(span, () => {
-        setImmediate(() => {
-          expect(scope.active()).to.equal(span)
-          done()
-        }, 0)
-      })
-    })
-
-    it('should persist through setInterval', done => {
-      scope.activate(span, () => {
-        let shouldReturn = false
-
-        const timer = setInterval(() => {
-          expect(scope.active()).to.equal(span)
-
-          if (shouldReturn) {
-            clearInterval(timer)
-            return done()
-          }
-
-          shouldReturn = true
-        }, 0)
-      })
-    })
-
-    it('should persist through process.nextTick', done => {
-      scope.activate(span, () => {
-        process.nextTick(() => {
-          expect(scope.active()).to.equal(span)
-          done()
-        }, 0)
-      })
-    })
-
-    it('should persist through promises', () => {
-      const promise = Promise.resolve()
-
-      return scope.activate(span, () => {
-        return promise.then(() => {
-          expect(scope.active()).to.equal(span)
-        })
-      })
-    })
-
-    it('should handle concurrency', done => {
-      scope.activate(span, () => {
-        setImmediate(() => {
-          expect(scope.active()).to.equal(span)
-          done()
-        })
-      })
-
-      scope.activate(span, () => {})
-    })
-
-    it('should handle errors', () => {
-      const error = new Error('boom')
-
-      sinon.spy(span, 'setTag')
-
-      try {
-        scope.activate(span, () => {
-          throw error
-        })
-      } catch (e) {
-        expect(span.setTag).to.have.been.calledWith('error', e)
-      }
-    })
+      expect(getScope()).to.equal(als ? ASYNC_RESOURCE : ASYNC_HOOKS)
+    }
+    assertVersion('10.0.0', false)
+    assertVersion('12.0.0', false)
+    assertVersion('12.18.99', false)
+    assertVersion('12.19.0', true)
+    assertVersion('13.0.0', false)
+    assertVersion('14.0.0', false)
+    assertVersion('14.4.99', false)
+    assertVersion('14.5.0', true)
+    assertVersion('14.5.1', true)
+    assertVersion('14.6.0', true)
+    assertVersion('15.0.0', true)
+    assertVersion('16.0.0', true)
+    assertVersion('17.0.0', true)
   })
 
-  describe('bind()', () => {
-    describe('with a function', () => {
-      it('should bind the function to the active span', () => {
-        let fn = () => {
-          expect(scope.active()).to.equal(span)
-        }
-
-        scope.activate(span, () => {
-          fn = scope.bind(fn)
-        })
-
-        fn()
-      })
-
-      it('should bind the function to the provided span', () => {
-        let fn = () => {
-          expect(scope.active()).to.equal(span)
-        }
-
-        fn = scope.bind(fn, span)
-
-        fn()
-      })
-
-      it('should keep the return value', () => {
-        let fn = () => 'test'
-
-        fn = scope.bind(fn)
-
-        expect(fn()).to.equal('test')
-      })
-    })
-
-    describe('with an unsupported target', () => {
-      it('should return the target', () => {
-        expect(scope.bind('test', span)).to.equal('test')
-      })
-    })
+  it('should go with user choice when scope is defined in options', () => {
+    expect(getScope('async_resource')).to.equal(ASYNC_RESOURCE)
+    expect(getScope('async_hooks')).to.equal(ASYNC_HOOKS)
   })
 })

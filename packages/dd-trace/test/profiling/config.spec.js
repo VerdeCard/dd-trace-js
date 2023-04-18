@@ -1,29 +1,17 @@
 'use strict'
 
-require('../setup/tap')
-
 const { expect } = require('chai')
 const os = require('os')
-const path = require('path')
 const { AgentExporter } = require('../../src/profiling/exporters/agent')
-const { FileExporter } = require('../../src/profiling/exporters/file')
-const CpuProfiler = require('../../src/profiling/profilers/cpu')
-const WallProfiler = require('../../src/profiling/profilers/wall')
-const SpaceProfiler = require('../../src/profiling/profilers/space')
+const { InspectorCpuProfiler } = require('../../src/profiling/profilers/inspector/cpu')
+const { InspectorHeapProfiler } = require('../../src/profiling/profilers/inspector/heap')
 const { ConsoleLogger } = require('../../src/profiling/loggers/console')
 
 describe('config', () => {
   let Config
-  let env
 
   beforeEach(() => {
     Config = require('../../src/profiling/config').Config
-    env = process.env
-    process.env = {}
-  })
-
-  afterEach(() => {
-    process.env = env
   })
 
   it('should have the correct defaults', () => {
@@ -32,7 +20,7 @@ describe('config', () => {
     expect(config).to.deep.include({
       enabled: true,
       service: 'node',
-      flushInterval: 65 * 1000
+      flushInterval: 60 * 1000
     })
 
     expect(config.tags).to.deep.equal({
@@ -42,8 +30,8 @@ describe('config', () => {
 
     expect(config.logger).to.be.an.instanceof(ConsoleLogger)
     expect(config.exporters[0]).to.be.an.instanceof(AgentExporter)
-    expect(config.profilers[0]).to.be.an.instanceof(WallProfiler)
-    expect(config.profilers[1]).to.be.an.instanceof(SpaceProfiler)
+    expect(config.profilers[0]).to.be.an.instanceof(InspectorCpuProfiler)
+    expect(config.profilers[1]).to.be.an.instanceof(InspectorHeapProfiler)
   })
 
   it('should support configuration options', () => {
@@ -52,13 +40,13 @@ describe('config', () => {
       service: 'test',
       version: '1.2.3-test.0',
       logger: {
-        debug () { },
-        info () { },
-        warn () { },
-        error () { }
+        debug () {},
+        info () {},
+        warn () {},
+        error () {}
       },
-      exporters: 'agent,file',
-      profilers: 'wall,cpu-experimental',
+      exporters: ['agent'],
+      profilers: [new InspectorCpuProfiler()],
       url: 'http://localhost:1234/'
     }
 
@@ -72,40 +60,13 @@ describe('config', () => {
     expect(config.tags.host).to.be.a('string')
     expect(config.tags.service).to.equal(options.service)
     expect(config.tags.version).to.equal(options.version)
-    expect(config.flushInterval).to.equal(65 * 1000)
+    expect(config.flushInterval).to.equal(60 * 1000)
     expect(config.exporters).to.be.an('array')
-    expect(config.exporters.length).to.equal(2)
-    expect(config.exporters[0]).to.be.an.instanceof(AgentExporter)
+    expect(config.exporters.length).to.equal(1)
     expect(config.exporters[0]._url.toString()).to.equal(options.url)
-    expect(config.exporters[1]).to.be.an.instanceof(FileExporter)
     expect(config.profilers).to.be.an('array')
-    expect(config.profilers.length).to.equal(2)
-    expect(config.profilers[0]).to.be.an.instanceOf(WallProfiler)
-    expect(config.profilers[1]).to.be.an.instanceOf(CpuProfiler)
-  })
-
-  it('should filter out invalid profilers', () => {
-    const errors = []
-    const options = {
-      logger: {
-        debug () {},
-        info () {},
-        warn () {},
-        error (error) {
-          errors.push(error)
-        }
-      },
-      profilers: 'nope,also_nope'
-    }
-
-    const config = new Config(options)
-
-    expect(config.profilers).to.be.an('array')
-    expect(config.profilers.length).to.equal(0)
-
-    expect(errors.length).to.equal(2)
-    expect(errors[0]).to.equal('Unknown profiler "nope"')
-    expect(errors[1]).to.equal('Unknown profiler "also_nope"')
+    expect(config.profilers.length).to.equal(1)
+    expect(config.profilers[0]).to.be.an.instanceOf(InspectorCpuProfiler)
   })
 
   it('should support tags', () => {
@@ -131,68 +92,5 @@ describe('config', () => {
     const config = new Config({ env, service, version, tags })
 
     expect(config.tags).to.include({ env, service, version })
-  })
-
-  it('should support IPv6 hostname', () => {
-    const options = {
-      hostname: '::1'
-    }
-
-    const config = new Config(options)
-    const exporterUrl = config.exporters[0]._url.toString()
-    const expectedUrl = new URL('http://[::1]:8126').toString()
-
-    expect(exporterUrl).to.equal(expectedUrl)
-  })
-
-  it('should disable OOM heap profiler by default', () => {
-    const config = new Config()
-    expect(config.oomMonitoring).to.deep.equal({
-      enabled: false,
-      heapLimitExtensionSize: 0,
-      maxHeapExtensionCount: 0,
-      exportStrategies: [],
-      exportCommand: undefined
-    })
-  })
-
-  it('should support OOM heap profiler configuration', () => {
-    process.env = {
-      DD_PROFILING_EXPERIMENTAL_OOM_MONITORING_ENABLED: 'false'
-    }
-    const config = new Config({})
-
-    expect(config.oomMonitoring).to.deep.equal({
-      enabled: false,
-      heapLimitExtensionSize: 0,
-      maxHeapExtensionCount: 0,
-      exportStrategies: [],
-      exportCommand: undefined
-    })
-  })
-
-  it('should support OOM heap profiler configuration', () => {
-    process.env = {
-      DD_PROFILING_EXPERIMENTAL_OOM_MONITORING_ENABLED: '1',
-      DD_PROFILING_EXPERIMENTAL_OOM_HEAP_LIMIT_EXTENSION_SIZE: '1000000',
-      DD_PROFILING_EXPERIMENTAL_OOM_MAX_HEAP_EXTENSION_COUNT: '2',
-      DD_PROFILING_EXPERIMENTAL_OOM_EXPORT_STRATEGIES: 'process,interrupt,async,interrupt'
-    }
-
-    const config = new Config({})
-
-    expect(config.oomMonitoring).to.deep.equal({
-      enabled: true,
-      heapLimitExtensionSize: 1000000,
-      maxHeapExtensionCount: 2,
-      exportStrategies: ['process', 'interrupt', 'async'],
-      exportCommand: [
-        process.execPath,
-        path.normalize(path.join(__dirname, '../../src/profiling', 'exporter_cli.js')),
-        'http://localhost:8126/',
-        `host:${config.host},service:node,snapshot:on_oom`,
-        'space'
-      ]
-    })
   })
 })

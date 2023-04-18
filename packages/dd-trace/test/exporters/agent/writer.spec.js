@@ -1,9 +1,5 @@
 'use strict'
 
-require('../../setup/tap')
-
-const { expect } = require('chai')
-
 const URL = require('url').URL
 
 function describeWriter (protocolVersion) {
@@ -34,7 +30,11 @@ function describeWriter (protocolVersion) {
       makePayload: sinon.stub().returns([])
     }
 
-    url = new URL('http://localhost:8126')
+    url = {
+      protocol: 'http:',
+      hostname: 'localhost',
+      port: 8126
+    }
 
     prioritySampler = {
       update: sinon.spy()
@@ -49,10 +49,10 @@ function describeWriter (protocolVersion) {
     }
 
     Writer = proxyquire('../src/exporters/agent/writer', {
-      '../common/request': request,
+      './request': request,
       '../../encode/0.4': { AgentEncoder },
       '../../encode/0.5': { AgentEncoder },
-      '../../../../../package.json': { version: 'tracerVersion' },
+      '../../../lib/version': 'tracerVersion',
       '../../log': log
     })
     writer = new Writer({ url, prioritySampler, protocolVersion })
@@ -76,8 +76,10 @@ function describeWriter (protocolVersion) {
       encoder.count.returns(2)
       encoder.makePayload.returns([Buffer.alloc(0)])
       writer.flush()
-      expect(request.getCall(0).args[1]).to.contain({
-        url
+      expect(request).to.have.been.calledWithMatch({
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port
       })
     })
   })
@@ -107,9 +109,10 @@ function describeWriter (protocolVersion) {
       encoder.count.returns(2)
       encoder.makePayload.returns([expectedData])
       writer.flush(() => {
-        expect(request.getCall(0).args[0]).to.eql([expectedData])
-        expect(request.getCall(0).args[1]).to.eql({
-          url,
+        expect(request).to.have.been.calledWithMatch({
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port,
           path: `/v${protocolVersion}/traces`,
           method: 'PUT',
           headers: {
@@ -120,28 +123,8 @@ function describeWriter (protocolVersion) {
             'Datadog-Meta-Tracer-Version': 'tracerVersion',
             'X-Datadog-Trace-Count': '2'
           },
+          data: [expectedData],
           lookup: undefined
-        })
-        done()
-      })
-    })
-
-    it('should pass through headers', (done) => {
-      const headers = {
-        'My-Header': 'bar'
-      }
-      writer = new Writer({ url, prioritySampler, protocolVersion, headers })
-      encoder.count.returns(2)
-      encoder.makePayload.returns([Buffer.from('data')])
-      writer.flush(() => {
-        expect(request.getCall(0).args[1].headers).to.eql({
-          ...headers,
-          'Content-Type': 'application/msgpack',
-          'Datadog-Meta-Lang': 'nodejs',
-          'Datadog-Meta-Lang-Version': process.version,
-          'Datadog-Meta-Lang-Interpreter': 'v8',
-          'Datadog-Meta-Tracer-Version': 'tracerVersion',
-          'X-Datadog-Trace-Count': '2'
         })
         done()
       })
@@ -181,8 +164,8 @@ function describeWriter (protocolVersion) {
         encoder.count.returns(1)
         writer.flush()
         setImmediate(() => {
-          expect(request.getCall(0).args[1]).to.contain({
-            url
+          expect(request).to.have.been.calledWithMatch({
+            socketPath: url.pathname
           })
         })
       })

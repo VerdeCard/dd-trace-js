@@ -1,10 +1,27 @@
 'use strict'
 
-const LogPlugin = require('../../dd-trace/src/plugins/log_plugin')
+const { LOG } = require('../../../ext/formats')
 
-class BunyanPlugin extends LogPlugin {
-  static get id () {
-    return 'bunyan'
+function createWrapEmit (tracer, config) {
+  return function wrapEmit (emit) {
+    return function emitWithTrace (rec, noemit) {
+      const span = tracer.scope().active()
+
+      tracer.inject(span, LOG, rec)
+
+      return emit.apply(this, arguments)
+    }
   }
 }
-module.exports = BunyanPlugin
+
+module.exports = {
+  name: 'bunyan',
+  versions: ['>=1'],
+  patch (Logger, tracer, config) {
+    if (!tracer._logInjection) return
+    this.wrap(Logger.prototype, '_emit', createWrapEmit(tracer, config))
+  },
+  unpatch (Logger) {
+    this.unwrap(Logger.prototype, '_emit')
+  }
+}

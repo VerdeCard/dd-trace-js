@@ -1,15 +1,25 @@
 'use strict'
 
-const { MEASURED } = require('../../../ext/tags')
+const ANALYTICS = require('../../../ext/tags').ANALYTICS
+
+let enabled = false
 
 module.exports = {
-  sample (span, measured, measuredByDefault) {
-    if (typeof measured === 'object') {
-      this.sample(span, measured[span.context()._name], measuredByDefault)
-    } else if (measured !== undefined) {
-      span.setTag(MEASURED, !!measured)
-    } else if (measuredByDefault) {
-      span.setTag(MEASURED, true)
+  enable () {
+    enabled = true
+  },
+
+  disable () {
+    enabled = false
+  },
+
+  sample (span, rate, inherit) {
+    if (typeof rate === 'object') {
+      this.sample(span, rate[span.context()._name], inherit)
+    } else if (rate !== undefined) {
+      span.setTag(ANALYTICS, rate)
+    } else if (inherit && enabled) {
+      span.setTag(ANALYTICS, 1)
     }
   }
 }

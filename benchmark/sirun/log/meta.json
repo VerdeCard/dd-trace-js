@@ -1,10 +1,8 @@
 {
   "name": "log",
   "run": "node index.js",
-  "run_with_affinity": "bash -c \"taskset -c $CPU_AFFINITY node index.js\"",
-  "cachegrind": false,
-  "iterations": 190,
-  "instructions": true,
+  "cachegrind": true,
+  "iterations": 10,
   "variants": {
     "without-log": { "env": { "DD_TRACE_DEBUG": "false" } },
     "skip-log": { "env": { "WITH_LEVEL": "debug", "DD_TRACE_LOG_LEVEL": "error" } },

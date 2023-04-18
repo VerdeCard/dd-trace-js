@@ -1,9 +1,9 @@
 'use strict'
 
-const { expect } = require('chai')
-const semver = require('semver')
 const agent = require('../../dd-trace/test/plugins/agent')
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   let tracer
@@ -139,7 +139,7 @@ describe('Plugin', () => {
   }
 
   describe('graphql', () => {
-    withVersions('graphql', 'graphql', version => {
+    withVersions(plugin, 'graphql', version => {
       before(() => {
         sort = spans => spans.sort((a, b) => {
           const order = [
@@ -172,80 +172,70 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         it('should instrument parsing', done => {
           const source = `query MyQuery { hello(name: "world") }`
-          const variableValues = { who: 'world' }
 
           agent
             .use(traces => {
               const span = traces[0][0]
 
-              expect(span).to.have.property('service', 'test')
+              expect(span).to.have.property('service', 'test-graphql')
               expect(span).to.have.property('name', 'graphql.parse')
               expect(span).to.have.property('resource', 'graphql.parse')
               expect(span).to.have.property('type', 'graphql')
-              expect(span).to.have.property('error', 0)
               expect(span.meta).to.not.have.property('graphql.source')
-              expect(span.meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, variableValues }).catch(done)
+          graphql.graphql(schema, source, null, null, { who: 'world' }).catch(done)
         })
 
         it('should instrument validation', done => {
           const source = `query MyQuery { hello(name: "world") }`
-          const variableValues = { who: 'world' }
 
           agent
             .use(traces => {
               const span = traces[0][0]
 
-              expect(span).to.have.property('service', 'test')
+              expect(span).to.have.property('service', 'test-graphql')
               expect(span).to.have.property('name', 'graphql.validate')
               expect(span).to.have.property('resource', 'graphql.validate')
               expect(span).to.have.property('type', 'graphql')
-              expect(span).to.have.property('error', 0)
               expect(span.meta).to.not.have.property('graphql.source')
-              expect(span.meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, variableValues }).catch(done)
+          graphql.graphql(schema, source, null, null, { who: 'world' }).catch(done)
         })
 
         it('should instrument execution', done => {
           const source = `query MyQuery { hello(name: "world") }`
-          const variableValues = { who: 'world' }
 
           agent
             .use(traces => {
               const spans = sort(traces[0])
 
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.execute')
               expect(spans[0]).to.have.property('resource', 'query MyQuery{hello(name:"")}')
               expect(spans[0]).to.have.property('type', 'graphql')
-              expect(spans[0]).to.have.property('error', 0)
               expect(spans[0].meta).to.not.have.property('graphql.source')
               expect(spans[0].meta).to.have.property('graphql.operation.type', 'query')
               expect(spans[0].meta).to.have.property('graphql.operation.name', 'MyQuery')
-              expect(spans[0].meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, variableValues }).catch(done)
+          graphql.graphql(schema, source, null, null, { who: 'world' }).catch(done)
         })
 
         it('should not include variables by default', done => {
           const source = `query MyQuery($who: String!) { hello(name: $who) }`
-          const variableValues = { who: 'world' }
 
           agent
             .use(traces => {
@@ -255,7 +245,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, variableValues }).catch(done)
+          graphql.graphql(schema, source, null, null, { who: 'world' }).catch(done)
         })
 
         it('should instrument schema resolvers', done => {
@@ -266,22 +256,20 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(2)
-              expect(spans[1]).to.have.property('service', 'test')
+              expect(spans[1]).to.have.property('service', 'test-graphql')
               expect(spans[1]).to.have.property('name', 'graphql.resolve')
               expect(spans[1]).to.have.property('resource', 'hello:String')
               expect(spans[1]).to.have.property('type', 'graphql')
-              expect(spans[1]).to.have.property('error', 0)
               expect(Number(spans[1].duration)).to.be.gt(0)
               expect(spans[1].meta).to.have.property('graphql.field.name', 'hello')
               expect(spans[1].meta).to.have.property('graphql.field.path', 'hello')
               expect(spans[1].meta).to.have.property('graphql.field.type', 'String')
               expect(spans[1].meta).to.not.have.property('graphql.source')
-              expect(spans[1].meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should instrument nested field resolvers', done => {
@@ -310,42 +298,36 @@ describe('Plugin', () => {
               const addressStreet = spans[5]
 
               expect(execute).to.have.property('name', 'graphql.execute')
-              expect(execute).to.have.property('error', 0)
 
               expect(human).to.have.property('name', 'graphql.resolve')
               expect(human).to.have.property('resource', 'human:Human')
-              expect(human).to.have.property('error', 0)
               expect(human.meta).to.have.property('graphql.field.path', 'human')
               expect(human.parent_id.toString()).to.equal(execute.span_id.toString())
 
               expect(humanName).to.have.property('name', 'graphql.resolve')
               expect(humanName).to.have.property('resource', 'name:String')
-              expect(humanName).to.have.property('error', 0)
               expect(humanName.meta).to.have.property('graphql.field.path', 'human.name')
               expect(humanName.parent_id.toString()).to.equal(human.span_id.toString())
 
               expect(address).to.have.property('name', 'graphql.resolve')
               expect(address).to.have.property('resource', 'address:Address')
-              expect(address).to.have.property('error', 0)
               expect(address.meta).to.have.property('graphql.field.path', 'human.address')
               expect(address.parent_id.toString()).to.equal(human.span_id.toString())
 
               expect(addressCivicNumber).to.have.property('name', 'graphql.resolve')
               expect(addressCivicNumber).to.have.property('resource', 'civicNumber:String')
-              expect(addressCivicNumber).to.have.property('error', 0)
               expect(addressCivicNumber.meta).to.have.property('graphql.field.path', 'human.address.civicNumber')
               expect(addressCivicNumber.parent_id.toString()).to.equal(address.span_id.toString())
 
               expect(addressStreet).to.have.property('name', 'graphql.resolve')
               expect(addressStreet).to.have.property('resource', 'street:String')
-              expect(addressStreet).to.have.property('error', 0)
               expect(addressStreet.meta).to.have.property('graphql.field.path', 'human.address.street')
               expect(addressStreet.parent_id.toString()).to.equal(address.span_id.toString())
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should instrument list field resolvers', done => {
@@ -395,7 +377,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should instrument mutations', done => {
@@ -410,7 +392,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should instrument subscriptions', done => {
@@ -425,13 +407,13 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should handle a circular schema', done => {
           const source = `{ human { pets { owner { name } } } }`
 
-          graphql.graphql({ schema, source })
+          graphql.graphql(schema, source)
             .then((result) => {
               expect(result.data.human.pets[0].owner.name).to.equal('test')
             })
@@ -447,7 +429,6 @@ describe('Plugin', () => {
           `)
 
           const source = `{ hello }`
-          const rootValue = { hello: 'world' }
 
           agent
             .use(traces => {
@@ -460,7 +441,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, rootValue }).catch(done)
+          graphql.graphql(schema, source, { hello: 'world' }).catch(done)
         })
 
         it('should instrument the execution field resolver without a rootValue resolver', done => {
@@ -505,15 +486,16 @@ describe('Plugin', () => {
               .then(done)
               .catch(done)
 
-            graphql.graphql({ schema, source }).catch(done)
+            graphql.graphql(schema, source).catch(done)
           })
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should run parsing, validation and execution in the current context', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const source = `query MyQuery { hello(name: "world") }`
-          const variableValues = { who: 'world' }
           const span = tracer.startSpan('test.request')
 
           agent
@@ -524,17 +506,17 @@ describe('Plugin', () => {
 
               expect(spans[0]).to.have.property('name', 'test.request')
 
-              expect(spans[1]).to.have.property('service', 'test')
+              expect(spans[1]).to.have.property('service', 'test-graphql')
               expect(spans[1]).to.have.property('name', 'graphql.parse')
 
-              expect(spans[2]).to.have.property('service', 'test')
+              expect(spans[2]).to.have.property('service', 'test-graphql')
               expect(spans[2]).to.have.property('name', 'graphql.validate')
 
-              expect(spans[3]).to.have.property('service', 'test')
+              expect(spans[3]).to.have.property('service', 'test-graphql')
               expect(spans[3]).to.have.property('name', 'graphql.execute')
               expect(spans[3]).to.have.property('resource', 'query MyQuery{hello(name:"")}')
 
-              expect(spans[4]).to.have.property('service', 'test')
+              expect(spans[4]).to.have.property('service', 'test-graphql')
               expect(spans[4]).to.have.property('name', 'graphql.resolve')
               expect(spans[4]).to.have.property('resource', 'hello:String')
             })
@@ -542,13 +524,15 @@ describe('Plugin', () => {
             .catch(done)
 
           tracer.scope().activate(span, () => {
-            graphql.graphql({ schema, source, variableValues })
+            graphql.graphql(schema, source, null, null, { who: 'world' })
               .then(() => span.finish())
               .catch(done)
           })
         })
 
         it('should run rootValue resolvers in the current context', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const schema = graphql.buildSchema(`
             type Query {
               hello: String
@@ -572,6 +556,8 @@ describe('Plugin', () => {
         })
 
         it('should run returned promise in the parent context', () => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return
+
           const schema = graphql.buildSchema(`
             type Query {
               hello: String
@@ -598,11 +584,11 @@ describe('Plugin', () => {
         })
 
         it('should handle unsupported operations', () => {
-          const source = `query MyQuery { hello(name: "world") }`
+          const query = `query MyQuery { hello(name: "world") }`
           const subscription = `subscription { human { name } }`
 
-          return graphql.graphql({ schema, source })
-            .then(() => graphql.graphql({ schema, source: subscription }))
+          return graphql.graphql(schema, query)
+            .then(() => graphql.graphql(schema, subscription))
             .then(result => {
               expect(result).to.not.have.property('errors')
             })
@@ -645,16 +631,15 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(2)
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.execute')
               expect(spans[0]).to.have.property('resource', 'query MyQuery{hello(name:"")}')
               expect(spans[0].meta).to.not.have.property('graphql.source')
-              expect(spans[0].meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.execute({ schema, document })
+          graphql.execute(schema, document)
         })
 
         it('should handle parsing exceptions', done => {
@@ -665,13 +650,12 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(1)
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.parse')
               expect(spans[0]).to.have.property('error', 1)
-              expect(spans[0].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(spans[0].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(spans[0].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(spans[0].meta).to.have.property('component', 'graphql')
+              expect(spans[0].meta).to.have.property('error.type', error.name)
+              expect(spans[0].meta).to.have.property('error.msg', error.message)
+              expect(spans[0].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
@@ -691,13 +675,12 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(1)
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.validate')
               expect(spans[0]).to.have.property('error', 1)
-              expect(spans[0].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(spans[0].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(spans[0].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(spans[0].meta).to.have.property('component', 'graphql')
+              expect(spans[0].meta).to.have.property('error.type', error.name)
+              expect(spans[0].meta).to.have.property('error.msg', error.message)
+              expect(spans[0].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
@@ -718,13 +701,12 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(1)
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.validate')
               expect(spans[0]).to.have.property('error', 1)
-              expect(spans[0].meta).to.have.property(ERROR_TYPE, errors[0].name)
-              expect(spans[0].meta).to.have.property(ERROR_MESSAGE, errors[0].message)
-              expect(spans[0].meta).to.have.property(ERROR_STACK, errors[0].stack)
-              expect(spans[0].meta).to.have.property('component', 'graphql')
+              expect(spans[0].meta).to.have.property('error.type', errors[0].name)
+              expect(spans[0].meta).to.have.property('error.msg', errors[0].message)
+              expect(spans[0].meta).to.have.property('error.stack', errors[0].stack)
             })
             .then(done)
             .catch(done)
@@ -743,13 +725,12 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(1)
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.execute')
               expect(spans[0]).to.have.property('error', 1)
-              expect(spans[0].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(spans[0].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(spans[0].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(spans[0].meta).to.have.property('component', 'graphql')
+              expect(spans[0].meta).to.have.property('error.type', error.name)
+              expect(spans[0].meta).to.have.property('error.msg', error.message)
+              expect(spans[0].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
@@ -784,18 +765,17 @@ describe('Plugin', () => {
               const spans = sort(traces[0])
 
               expect(spans).to.have.length(2)
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.execute')
               expect(spans[0]).to.have.property('error', 1)
-              expect(spans[0].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(spans[0].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(spans[0].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(spans[0].meta).to.have.property('component', 'graphql')
+              expect(spans[0].meta).to.have.property('error.type', error.name)
+              expect(spans[0].meta).to.have.property('error.msg', error.message)
+              expect(spans[0].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
 
-          Promise.resolve(graphql.execute({ schema, document, rootValue }))
+          Promise.resolve(graphql.execute(schema, document, rootValue))
             .then(res => {
               error = res.errors[0]
             })
@@ -824,10 +804,9 @@ describe('Plugin', () => {
 
               expect(spans).to.have.length(2)
               expect(spans[1]).to.have.property('error', 1)
-              expect(spans[1].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(spans[1].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(spans[1].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(spans[1].meta).to.have.property('component', 'graphql')
+              expect(spans[1].meta).to.have.property('error.type', error.name)
+              expect(spans[1].meta).to.have.property('error.msg', error.message)
+              expect(spans[1].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
@@ -858,10 +837,9 @@ describe('Plugin', () => {
 
               expect(spans).to.have.length(2)
               expect(spans[1]).to.have.property('error', 1)
-              expect(spans[1].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(spans[1].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(spans[1].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(spans[1].meta).to.have.property('component', 'graphql')
+              expect(spans[1].meta).to.have.property('error.type', error.name)
+              expect(spans[1].meta).to.have.property('error.msg', error.message)
+              expect(spans[1].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
@@ -923,13 +901,12 @@ describe('Plugin', () => {
             .use(traces => {
               const spans = sort(traces[0])
 
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.execute')
               expect(spans[0]).to.have.property('resource', 'query SecondQuery{hello(name:"")}')
               expect(spans[0].meta).to.not.have.property('graphql.source')
               expect(spans[0].meta).to.have.property('graphql.operation.type', 'query')
               expect(spans[0].meta).to.have.property('graphql.operation.name', 'SecondQuery')
-              expect(spans[0].meta).to.have.property('component', 'graphql')
             })
             .then(() => done())
             .catch(done)
@@ -955,18 +932,17 @@ describe('Plugin', () => {
 
               const resource = 'query WithFragments{human{...firstFields}}fragment firstFields on Human{name}'
 
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.execute')
               expect(spans[0]).to.have.property('resource', resource)
               expect(spans[0].meta).to.not.have.property('graphql.source')
               expect(spans[0].meta).to.have.property('graphql.operation.type', 'query')
               expect(spans[0].meta).to.have.property('graphql.operation.name', 'WithFragments')
-              expect(spans[0].meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should handle single fragment definitions', done => {
@@ -980,53 +956,18 @@ describe('Plugin', () => {
             .use(traces => {
               const spans = sort(traces[0])
 
-              expect(spans[0]).to.have.property('service', 'test')
+              expect(spans[0]).to.have.property('service', 'test-graphql')
               expect(spans[0]).to.have.property('name', 'graphql.parse')
               expect(spans[0]).to.have.property('resource', 'graphql.parse')
               expect(spans[0].meta).to.not.have.property('graphql.source')
               expect(spans[0].meta).to.not.have.property('graphql.operation.type')
               expect(spans[0].meta).to.not.have.property('graphql.operation.name')
-              expect(spans[0].meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
-
-        // https://github.com/graphql/graphql-js/pull/2904
-        if (!semver.intersects(version, '>=16')) {
-          it('should instrument using positional arguments', done => {
-            const source = `query MyQuery { hello(name: "world") }`
-            const variableValues = { who: 'world' }
-
-            agent
-              .use(traces => {
-                const spans = sort(traces[0])
-
-                expect(spans[0]).to.have.property('service', 'test')
-                expect(spans[0]).to.have.property('name', 'graphql.execute')
-                expect(spans[0]).to.have.property('resource', 'query MyQuery{hello(name:"")}')
-                expect(spans[0]).to.have.property('type', 'graphql')
-                expect(spans[0].meta).to.not.have.property('graphql.source')
-                expect(spans[0].meta).to.have.property('graphql.operation.type', 'query')
-                expect(spans[0].meta).to.have.property('graphql.operation.name', 'MyQuery')
-                expect(spans[0].meta).to.have.property('component', 'graphql')
-              })
-              .then(done)
-              .catch(done)
-
-            graphql.graphql(schema, source, null, null, variableValues).catch(done)
-          })
-        } else {
-          it('should not support positional arguments', done => {
-            const source = `query MyQuery { hello(name: "world") }`
-            const variableValues = { who: 'world' }
-
-            graphql.graphql(schema, source, null, null, variableValues)
-              .then(() => done(new Error('Expected error.')), () => done())
-          })
-        }
 
         // it('should not disable signature with invalid arguments', done => {
         //   agent
@@ -1036,7 +977,7 @@ describe('Plugin', () => {
         //       console.log(spans.map(span => `${span.name} | ${span.resource}`))
         //       const resource = 'query WithFragments{human{...firstFields}}fragment firstFields on Human{name}'
 
-        //       expect(spans[0]).to.have.property('service', 'test')
+        //       expect(spans[0]).to.have.property('service', 'test-graphql')
         //       expect(spans[0]).to.have.property('name', 'graphql.execute')
         //       expect(spans[0]).to.have.property('resource', resource)
         //       expect(spans[0].meta).to.not.have.property('graphql.source')
@@ -1078,7 +1019,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -1097,14 +1038,12 @@ describe('Plugin', () => {
               expect(spans[0]).to.have.property('service', 'test')
               expect(spans[1]).to.have.property('service', 'test')
               expect(spans[0].meta).to.have.property('graphql.source', '{ hello(name: "world") }')
-              expect(spans[0].meta).to.have.property('component', 'graphql')
               expect(spans[1].meta).to.have.property('graphql.source', 'hello(name: "world")')
-              expect(spans[1].meta).to.have.property('component', 'graphql')
             })
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should apply the filter callback to the variables', done => {
@@ -1113,7 +1052,6 @@ describe('Plugin', () => {
               hello(title: $title, name: $who)
             }
           `
-          const variableValues = { title: 'planet', who: 'world' }
 
           agent
             .use(traces => {
@@ -1127,7 +1065,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, variableValues }).catch(done)
+          graphql.graphql(schema, source, null, null, { title: 'planet', who: 'world' }).catch(done)
         })
       })
 
@@ -1141,7 +1079,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -1155,7 +1093,6 @@ describe('Plugin', () => {
               hello(title: $title, name: $who)
             }
           `
-          const variableValues = { title: 'planet', who: 'world' }
 
           agent
             .use(traces => {
@@ -1167,7 +1104,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source, variableValues }).catch(done)
+          graphql.graphql(schema, source, null, null, { title: 'planet', who: 'world' }).catch(done)
         })
       })
 
@@ -1179,7 +1116,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -1210,10 +1147,12 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
 
         it('should run the resolvers in the execution scope', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const schema = graphql.buildSchema(`
             type Query {
               hello: String
@@ -1248,7 +1187,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -1288,7 +1227,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
       })
 
@@ -1300,7 +1239,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -1342,7 +1281,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
       })
 
@@ -1354,7 +1293,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -1375,25 +1314,16 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          graphql.graphql({ schema, source }).catch(done)
+          graphql.graphql(schema, source).catch(done)
         })
       })
 
       describe('with hooks configuration', () => {
         const config = {
           hooks: {
-            execute: sinon.spy((span, context, res) => {}),
-            parse: sinon.spy((span, document, operation) => {}),
-            validate: sinon.spy((span, document, error) => {})
+            execute: sinon.spy((span, context, res) => {})
           }
         }
-
-        const source = `
-            fragment queryFields on Query {
-              hello(name: "world")
-            }
-            query MyQuery { ...queryFields }
-          `
 
         before(() => {
           tracer = require('../../dd-trace')
@@ -1410,11 +1340,16 @@ describe('Plugin', () => {
           key => config.hooks[key].resetHistory()
         ))
 
-        after(() => agent.close({ ritmReset: false }))
+        after(() => agent.close())
 
         it('should run the execute hook before graphql.execute span is finished', done => {
+          const source = `
+            fragment queryFields on Query {
+              hello(name: "world")
+            }
+            query MyQuery { ...queryFields }
+          `
           const document = graphql.parse(source)
-
           graphql.validate(schema, document)
 
           const params = {
@@ -1465,63 +1400,9 @@ describe('Plugin', () => {
               result = res
             })
         })
-
-        it('should run the validate hook before graphql.validate span is finished', done => {
-          const document = graphql.parse(source)
-
-          agent
-            .use(traces => {
-              const spans = sort(traces[0])
-
-              expect(spans).to.have.length(1)
-              expect(spans[0]).to.have.property('name', 'graphql.validate')
-              expect(config.hooks.validate).to.have.been.calledOnce
-
-              const span = config.hooks.validate.firstCall.args[0]
-              const hookDocument = config.hooks.validate.firstCall.args[1]
-              const hookErrors = config.hooks.validate.firstCall.args[2]
-
-              expect(span.context()._name).to.equal('graphql.validate')
-
-              expect(hookDocument).to.equal(document)
-              expect(hookErrors).to.equal(errors)
-            })
-            .then(done)
-            .catch(done)
-          const errors = graphql.validate(schema, document)
-        })
-
-        it('should run the parse hook before graphql.parse span is finished', done => {
-          let document
-
-          agent
-            .use(traces => {
-              const spans = sort(traces[0])
-
-              expect(spans).to.have.length(1)
-              expect(spans[0]).to.have.property('name', 'graphql.parse')
-              expect(config.hooks.parse).to.have.been.calledOnce
-
-              const span = config.hooks.parse.firstCall.args[0]
-              const hookSource = config.hooks.parse.firstCall.args[1]
-              const hookDocument = config.hooks.parse.firstCall.args[2]
-
-              expect(span.context()._name).to.equal('graphql.parse')
-
-              expect(hookSource).to.equal(source)
-              expect(hookDocument).to.equal(document)
-            })
-            .then(done)
-            .catch(done)
-
-          Promise.resolve(graphql.parse(source))
-            .then(res => {
-              document = res
-            })
-        })
       })
 
-      withVersions('graphql', 'apollo-server-core', apolloVersion => {
+      withVersions(plugin, 'apollo-server-core', apolloVersion => {
         let runQuery
         let mergeSchemas
         let makeExecutableSchema
@@ -1543,7 +1424,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         it('should support apollo-server schema stitching', done => {

@@ -1,35 +1,26 @@
 'use strict'
 
-module.exports = ({ Assertion, expect }, { expectTypes }) => {
-  Assertion.addProperty('valueType', function () {
-    const obj = this._obj
-
-    expect(obj).to.be.a('object')
-    expect(obj.type).to.be.a('number')
-    expect(obj.unit).to.be.a('number')
-  })
-
-  Assertion.addProperty('numeric', function () {
-    expectTypes(this, ['number', 'bigint'])
-  })
-
+module.exports = ({ Assertion, expect }) => {
   Assertion.addProperty('profile', function () {
     const obj = this._obj
 
     expect(obj).to.be.an('object')
 
-    expect(obj.timeNanos).to.be.a('bigint')
-    expect(obj.period).to.be.numeric
-    expect(obj.periodType).to.be.a.valueType
-    expect(obj.sampleType).to.be.an('array').and.have.length(2)
-    expect(obj.sample).to.be.an('array')
-    expect(obj.location).to.be.an('array')
-    expect(obj.function).to.be.an('array')
-    expect(obj.stringTable.strings).to.be.an('array').and.have.length.at.least(1)
-    expect(obj.stringTable.strings[0]).to.equal('')
+    expect(obj.timeNanos).to.be.a('number')
+    expect(obj.period).to.be.a('number')
+    expect(obj.periodType).to.be.a('object')
+    expect(obj.periodType.type).to.be.a('number')
+    expect(obj.periodType.unit).to.be.a('number')
+    expect(obj.sampleType).to.be.an('array').and.have.length.at.least(1)
+    expect(obj.sample).to.be.an('array').and.have.length.at.least(1)
+    expect(obj.location).to.be.an('array').and.have.length.at.least(1)
+    expect(obj.function).to.be.an('array').and.have.length.at.least(1)
+    expect(obj.stringTable).to.be.an('array')
+    expect(obj.stringTable[0]).to.equal('')
 
     for (const sampleType of obj.sampleType) {
-      expect(sampleType).to.be.a.valueType
+      expect(sampleType.type).to.be.a('number')
+      expect(sampleType.unit).to.be.a('number')
     }
 
     for (const fn of obj.function) {

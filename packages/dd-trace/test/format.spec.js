@@ -1,26 +1,18 @@
 'use strict'
 
-require('./setup/tap')
-
 const constants = require('../src/constants')
 const tags = require('../../../ext/tags')
 const id = require('../src/id')
 
 const SAMPLING_PRIORITY_KEY = constants.SAMPLING_PRIORITY_KEY
+const ANALYTICS_KEY = constants.ANALYTICS_KEY
+const ANALYTICS = tags.ANALYTICS
 const MEASURED = tags.MEASURED
 const ORIGIN_KEY = constants.ORIGIN_KEY
 const HOSTNAME_KEY = constants.HOSTNAME_KEY
 const SAMPLING_AGENT_DECISION = constants.SAMPLING_AGENT_DECISION
 const SAMPLING_LIMIT_DECISION = constants.SAMPLING_LIMIT_DECISION
 const SAMPLING_RULE_DECISION = constants.SAMPLING_RULE_DECISION
-const SPAN_SAMPLING_MECHANISM = constants.SPAN_SAMPLING_MECHANISM
-const SPAN_SAMPLING_RULE_RATE = constants.SPAN_SAMPLING_RULE_RATE
-const SPAN_SAMPLING_MAX_PER_SECOND = constants.SPAN_SAMPLING_MAX_PER_SECOND
-const SAMPLING_MECHANISM_SPAN = constants.SAMPLING_MECHANISM_SPAN
-const PROCESS_ID = constants.PROCESS_ID
-const ERROR_MESSAGE = constants.ERROR_MESSAGE
-const ERROR_STACK = constants.ERROR_STACK
-const ERROR_TYPE = constants.ERROR_TYPE
 
 const spanId = id('0234567812345678')
 
@@ -128,47 +120,6 @@ describe('format', () => {
       )
     })
 
-    it('should always add single span ingestion tags from options if present', () => {
-      spanContext._sampling.spanSampling = {
-        maxPerSecond: 5,
-        sampleRate: 1.0
-      }
-      trace = format(span)
-
-      expect(trace.metrics).to.include({
-        [SPAN_SAMPLING_MECHANISM]: SAMPLING_MECHANISM_SPAN,
-        [SPAN_SAMPLING_MAX_PER_SECOND]: 5,
-        [SPAN_SAMPLING_RULE_RATE]: 1.0
-      })
-    })
-
-    it('should not add single span ingestion tags if options not present', () => {
-      trace = format(span)
-
-      expect(trace.metrics).to.not.have.keys(
-        SPAN_SAMPLING_MECHANISM,
-        SPAN_SAMPLING_MAX_PER_SECOND,
-        SPAN_SAMPLING_RULE_RATE
-      )
-    })
-
-    it('should extract trace chunk tags', () => {
-      spanContext._trace.tags = {
-        chunk: 'test',
-        count: 1
-      }
-
-      trace = format(span)
-
-      expect(trace.meta).to.include({
-        chunk: 'test'
-      })
-
-      expect(trace.metrics).to.include({
-        count: 1
-      })
-    })
-
     it('should discard user-defined tags with name HOSTNAME_KEY by default', () => {
       spanContext._tags[HOSTNAME_KEY] = 'some_hostname'
 
@@ -206,15 +157,6 @@ describe('format', () => {
       expect(trace.metrics).to.have.property('metric', 50)
     })
 
-    it('should extract boolean tags as metrics', () => {
-      spanContext._tags = { yes: true, no: false }
-
-      trace = format(span)
-
-      expect(trace.metrics).to.have.property('yes', 1)
-      expect(trace.metrics).to.have.property('no', 0)
-    })
-
     it('should ignore metrics with invalid type', () => {
       spanContext._metrics = { metric: 'test' }
 
@@ -237,9 +179,9 @@ describe('format', () => {
       spanContext._tags['error'] = error
       trace = format(span)
 
-      expect(trace.meta[ERROR_MESSAGE]).to.equal(error.message)
-      expect(trace.meta[ERROR_TYPE]).to.equal(error.name)
-      expect(trace.meta[ERROR_STACK]).to.equal(error.stack)
+      expect(trace.meta['error.msg']).to.equal(error.message)
+      expect(trace.meta['error.type']).to.equal(error.name)
+      expect(trace.meta['error.stack']).to.equal(error.stack)
     })
 
     it('should skip error properties without a value', () => {
@@ -250,9 +192,9 @@ describe('format', () => {
       spanContext._tags['error'] = error
       trace = format(span)
 
-      expect(trace.meta[ERROR_MESSAGE]).to.equal(error.message)
-      expect(trace.meta).to.not.have.property(ERROR_TYPE)
-      expect(trace.meta).to.not.have.property(ERROR_STACK)
+      expect(trace.meta['error.msg']).to.equal(error.message)
+      expect(trace.meta).to.not.have.property('error.type')
+      expect(trace.meta).to.not.have.property('error.stack')
     })
 
     it('should extract the origin', () => {
@@ -263,10 +205,59 @@ describe('format', () => {
       expect(trace.meta[ORIGIN_KEY]).to.equal('synthetics')
     })
 
-    it('should add the language tag for a basic span', () => {
+    it('should extract unempty objects', () => {
+      spanContext._tags['root'] = {
+        level1: {
+          level2: {
+            level3: {}
+          },
+          array: ['hello']
+        }
+      }
+
+      trace = format(span)
+
+      expect(trace.meta['root.level1.array']).to.equal('hello')
+      expect(trace.meta['root.level1.level2']).to.be.undefined
+      expect(trace.meta['root.level1.level2.level3']).to.be.undefined
+    })
+
+    it('should support nested arrays', () => {
+      spanContext._tags['root'] = {
+        array: ['a', ['b', ['c']]]
+      }
+
+      trace = format(span)
+
+      expect(trace.meta['root.array']).to.equal('a,b,c')
+    })
+
+    it('should support objects in arrays', () => {
+      class Foo {}
+
+      spanContext._tags['root'] = {
+        array: ['a', { 'bar': 'baz' }, new Foo()]
+      }
+
+      trace = format(span)
+
+      expect(trace.meta['root.array']).to.equal('a,[object Object],[object Object]')
+    })
+
+    it('should add runtime tags', () => {
+      spanContext._tags['service.name'] = 'test'
+
       trace = format(span)
 
       expect(trace.meta['language']).to.equal('javascript')
+    })
+
+    it('should add runtime tags only for the root service', () => {
+      spanContext._tags['service.name'] = 'other'
+
+      trace = format(span)
+
+      expect(trace.meta).to.not.have.property('language')
     })
 
     describe('when there is an `error` tag ', () => {
@@ -296,9 +287,9 @@ describe('format', () => {
     })
 
     it('should set the error flag when there is an error-related tag', () => {
-      spanContext._tags[ERROR_TYPE] = 'Error'
-      spanContext._tags[ERROR_MESSAGE] = 'boom'
-      spanContext._tags[ERROR_STACK] = ''
+      spanContext._tags['error.type'] = 'Error'
+      spanContext._tags['error.msg'] = 'boom'
+      spanContext._tags['error.stack'] = ''
 
       trace = format(span)
 
@@ -306,9 +297,9 @@ describe('format', () => {
     })
 
     it('should not set the error flag for internal spans with error tags', () => {
-      spanContext._tags[ERROR_TYPE] = 'Error'
-      spanContext._tags[ERROR_MESSAGE] = 'boom'
-      spanContext._tags[ERROR_STACK] = ''
+      spanContext._tags['error.type'] = 'Error'
+      spanContext._tags['error.msg'] = 'boom'
+      spanContext._tags['error.stack'] = ''
       spanContext._name = 'fs.operation'
 
       trace = format(span)
@@ -350,22 +341,189 @@ describe('format', () => {
       expect(trace.metrics[SAMPLING_PRIORITY_KEY]).to.equal(0)
     })
 
-    it('should support only the first level of depth for objects', () => {
+    it('should support objects without a toString implementation', () => {
+      spanContext._tags['foo'] = []
+      spanContext._tags['foo'].toString = null
+      trace = format(span)
+      expect(trace.meta['foo']).to.equal('[]')
+    })
+
+    it('should support objects with a non-function toString property', () => {
+      spanContext._tags['foo'] = []
+      spanContext._tags['foo'].toString = 'baz'
+      trace = format(span)
+      expect(trace.meta['foo']).to.equal('[]')
+    })
+
+    it('should support direct circular references', () => {
+      const tag = { 'foo': 'bar' }
+
+      tag.self = tag
+      spanContext._tags['circularTag'] = tag
+
+      trace = format(span)
+
+      expect(trace.meta['circularTag.foo']).to.equal('bar')
+      expect(trace.meta['circularTag.self']).to.equal('[Circular]')
+    })
+
+    it('should support indirect circular references', () => {
+      const obj = { 'foo': 'bar' }
+      const tag = { obj, 'baz': 'qux' }
+
+      obj.self = tag
+
+      spanContext._tags['circularTag'] = tag
+      trace = format(span)
+
+      expect(trace.meta['circularTag.baz']).to.equal('qux')
+      expect(trace.meta['circularTag.obj.foo']).to.equal('bar')
+      expect(trace.meta['circularTag.obj.self']).to.equal('[Circular]')
+    })
+
+    it('should support deep circular references', () => {
       const tag = {
         A: {
-          B: {},
+          B: {
+            C: {
+              D: {
+                E: {
+                  num: '6'
+                },
+                num: '5'
+              },
+              num: '4'
+            },
+            num: '3'
+          },
           num: '2'
         },
         num: '1'
       }
 
-      spanContext._tags['nested'] = tag
+      tag.A.B.C.D.E.self = tag.A.B
+
+      spanContext._tags['circularTag'] = tag
       trace = format(span)
 
-      expect(trace.meta['nested.num']).to.equal('1')
-      expect(trace.meta['nested.A']).to.be.undefined
-      expect(trace.meta['nested.A.B']).to.be.undefined
-      expect(trace.meta['nested.A.num']).to.be.undefined
+      expect(trace.meta['circularTag.num']).to.equal('1')
+      expect(trace.meta['circularTag.A.num']).to.equal('2')
+      expect(trace.meta['circularTag.A.B.num']).to.equal('3')
+      expect(trace.meta['circularTag.A.B.C.num']).to.equal('4')
+      expect(trace.meta['circularTag.A.B.C.D.num']).to.equal('5')
+      expect(trace.meta['circularTag.A.B.C.D.E.num']).to.equal('6')
+      expect(trace.meta['circularTag.A.B.C.D.E.self']).to.equal('[Circular]')
+    })
+
+    it('should support circular references in a class', () => {
+      class CircularTag {
+        constructor () {
+          this.foo = 'bar'
+          this.self = this
+        }
+      }
+
+      const tag = new CircularTag()
+
+      spanContext._tags['circularTag'] = tag
+      trace = format(span)
+
+      expect(trace.meta['circularTag.foo']).to.equal('bar')
+      expect(trace.meta['circularTag.self']).to.equal('[Circular]')
+    })
+
+    it('should support re-used objects', () => {
+      const obj = { foo: 'bar' }
+      const tag = {
+        baz: obj,
+        qux: obj
+      }
+
+      spanContext._tags['circularTag'] = tag
+      trace = format(span)
+
+      expect(trace.meta['circularTag.baz.foo']).to.equal('bar')
+      expect(trace.meta['circularTag.qux.foo']).to.equal('bar')
+    })
+
+    it('should support doubly-linked objects', () => {
+      const tag = {
+        selfA: { ghost: 'eater' },
+        selfB: { space: 'invader' }
+      }
+
+      tag.selfA.self = tag.selfB
+      tag.selfB.self = tag.selfA
+
+      spanContext._tags['circularTag'] = tag
+      trace = format(span)
+
+      expect(trace.meta['circularTag.selfA.ghost']).to.equal('eater')
+      expect(trace.meta['circularTag.selfA.self.self']).to.equal('[Circular]')
+      expect(trace.meta['circularTag.selfA.self.space']).to.equal('invader')
+      expect(trace.meta['circularTag.selfB.self.ghost']).to.equal('eater')
+      expect(trace.meta['circularTag.selfB.self.self']).to.equal('[Circular]')
+      expect(trace.meta['circularTag.selfB.space']).to.equal('invader')
+    })
+
+    it('should support re-used arrays', () => {
+      const obj = ['bar']
+      const tag = {
+        baz: obj,
+        qux: obj
+      }
+
+      spanContext._tags['circularTag'] = tag
+      trace = format(span)
+
+      expect(trace.meta['circularTag.baz']).to.equal('bar')
+      expect(trace.meta['circularTag.qux']).to.equal('bar')
+    })
+
+    it('should support re-used arrays within arrays', () => {
+      const obj = {}
+      const tag = [obj, [obj]]
+
+      spanContext._tags['circularTag'] = tag
+      trace = format(span)
+
+      expect(trace.meta['circularTag']).to.equal('[object Object],[object Object]')
+    })
+
+    it('should include the analytics sample rate', () => {
+      spanContext._tags[ANALYTICS] = 0.5
+      trace = format(span)
+      expect(trace.metrics[ANALYTICS_KEY]).to.equal(0.5)
+    })
+
+    it('should limit the min analytics sample rate', () => {
+      spanContext._tags[ANALYTICS] = -1
+      trace = format(span)
+      expect(trace.metrics[ANALYTICS_KEY]).to.equal(0)
+    })
+
+    it('should limit the max analytics sample rate', () => {
+      spanContext._tags[ANALYTICS] = 2
+      trace = format(span)
+      expect(trace.metrics[ANALYTICS_KEY]).to.equal(1)
+    })
+
+    it('should accept boolean true for analytics', () => {
+      spanContext._tags[ANALYTICS] = true
+      trace = format(span)
+      expect(trace.metrics[ANALYTICS_KEY]).to.equal(1)
+    })
+
+    it('should accept boolean false for analytics', () => {
+      spanContext._tags[ANALYTICS] = false
+      trace = format(span)
+      expect(trace.metrics[ANALYTICS_KEY]).to.be.undefined
+    })
+
+    it('should accept strings for analytics', () => {
+      spanContext._tags[ANALYTICS] = '0.5'
+      trace = format(span)
+      expect(trace.metrics[ANALYTICS_KEY]).to.equal(0.5)
     })
 
     it('should accept a boolean for measured', () => {
@@ -408,19 +566,6 @@ describe('format', () => {
       spanContext._tags['span.kind'] = 'server'
       trace = format(span)
       expect(trace.metrics[MEASURED]).to.equal(0)
-    })
-
-    it('should possess a process_id tag', () => {
-      trace = format(span)
-      expect(trace.metrics[PROCESS_ID]).to.equal(process.pid)
-    })
-
-    it('should not crash on prototype-free tags objects when nesting', () => {
-      const tags = Object.create(null)
-      tags['nested'] = { foo: 'bar' }
-      spanContext._tags['nested'] = tags
-
-      format(span)
     })
   })
 })

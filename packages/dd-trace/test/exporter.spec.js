@@ -1,7 +1,4 @@
 'use strict'
-
-require('./setup/tap')
-
 const fs = require('fs')
 
 const AgentExporter = require('../src/exporters/agent')

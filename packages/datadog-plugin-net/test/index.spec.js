@@ -1,11 +1,11 @@
 'use strict'
 
 const getPort = require('get-port')
-const dns = require('dns')
 const agent = require('../../dd-trace/test/plugins/agent')
 const { expectSomeSpan } = require('../../dd-trace/test/plugins/helpers')
 const { Int64BE } = require('int64-buffer') // TODO remove dependency
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
+
+wrapIt()
 
 describe('Plugin', () => {
   let net
@@ -61,7 +61,7 @@ describe('Plugin', () => {
     it('should instrument connect with a path', done => {
       expectSomeSpan(agent, {
         name: 'ipc.connect',
-        service: 'test',
+        service: 'test-ipc',
         resource: '/tmp/dd-trace.sock',
         meta: {
           'span.kind': 'client',
@@ -82,18 +82,17 @@ describe('Plugin', () => {
         socket.on('connect', () => {
           expectSomeSpan(agent, {
             name: 'tcp.connect',
-            service: 'test',
+            service: 'test-tcp',
             resource: `localhost:${port}`,
             meta: {
-              'component': 'net',
               'span.kind': 'client',
               'tcp.family': 'IPv4',
               'tcp.remote.host': 'localhost',
-              'tcp.local.address': socket.localAddress,
+              'tcp.local.address': '127.0.0.1',
               'out.host': 'localhost'
             },
             metrics: {
-              'network.destination.port': port,
+              'out.port': port,
               'tcp.remote.port': port,
               'tcp.local.port': socket.localPort
             },
@@ -113,18 +112,17 @@ describe('Plugin', () => {
         socket.on('connect', () => {
           expectSomeSpan(agent, {
             name: 'tcp.connect',
-            service: 'test',
+            service: 'test-tcp',
             resource: `localhost:${port}`,
             meta: {
-              'component': 'net',
               'span.kind': 'client',
               'tcp.family': 'IPv4',
               'tcp.remote.host': 'localhost',
-              'tcp.local.address': socket.localAddress,
+              'tcp.local.address': '127.0.0.1',
               'out.host': 'localhost'
             },
             metrics: {
-              'network.destination.port': port,
+              'out.port': port,
               'tcp.remote.port': port,
               'tcp.local.port': socket.localPort
             },
@@ -137,10 +135,9 @@ describe('Plugin', () => {
     it('should instrument connect with IPC options', done => {
       expectSomeSpan(agent, {
         name: 'ipc.connect',
-        service: 'test',
+        service: 'test-ipc',
         resource: '/tmp/dd-trace.sock',
         meta: {
-          'component': 'net',
           'span.kind': 'client',
           'ipc.path': '/tmp/dd-trace.sock'
         },
@@ -163,21 +160,20 @@ describe('Plugin', () => {
         .use(traces => {
           expect(traces[0][0]).to.deep.include({
             name: 'tcp.connect',
-            service: 'test',
+            service: 'test-tcp',
             resource: `localhost:${port}`
           })
           expect(traces[0][0].meta).to.deep.include({
-            'component': 'net',
             'span.kind': 'client',
             'tcp.family': 'IPv4',
             'tcp.remote.host': 'localhost',
             'out.host': 'localhost',
-            [ERROR_TYPE]: error.name,
-            [ERROR_MESSAGE]: error.message,
-            [ERROR_STACK]: error.stack
+            'error.type': error.name,
+            'error.msg': error.message,
+            'error.stack': error.stack
           })
           expect(traces[0][0].metrics).to.deep.include({
-            'network.destination.port': port,
+            'out.port': port,
             'tcp.remote.port': port
           })
           expect(traces[0][0].parent_id.toString()).to.equal(parent.context().toSpanId())
@@ -210,65 +206,25 @@ describe('Plugin', () => {
       })
     })
 
-    it('should run event listeners in the correct scope', () => {
-      return tracer.scope().activate(parent, () => {
-        const socket = new net.Socket()
+    it('should run event listeners in the correct scope', done => {
+      const socket = new net.Socket()
 
-        const promises = Array(5).fill(0).map(() => {
-          let res
-          let rej
-          const p = new Promise((resolve, reject) => {
-            res = resolve
-            rej = reject
-          })
-          p.resolve = res
-          p.reject = rej
-          return p
-        })
-
-        socket.on('connect', () => {
+      tracer.scope().activate(parent, () => {
+        socket.once('close', () => {
           expect(tracer.scope().active()).to.equal(parent)
-          promises[0].resolve()
+          done()
         })
-
-        socket.on('ready', () => {
-          expect(tracer.scope().active()).to.equal(parent)
-          socket.destroy()
-          promises[1].resolve()
-        })
-
-        socket.on('close', () => {
-          expect(tracer.scope().active()).to.not.be.null
-          expect(tracer.scope().active().context()._name).to.equal('tcp.connect')
-          promises[2].resolve()
-        })
-
-        socket.on('lookup', () => {
-          expect(tracer.scope().active()).to.not.be.null
-          expect(tracer.scope().active().context()._name).to.equal('tcp.connect')
-          promises[3].resolve()
-        })
-
-        socket.connect({
-          port,
-          lookup: (...args) => {
-            expect(tracer.scope().active()).to.not.be.null
-            expect(tracer.scope().active().context()._name).to.equal('tcp.connect')
-            promises[4].resolve()
-            dns.lookup(...args)
-          }
-        })
-
-        return Promise.all(promises)
       })
+
+      socket.connect({ port })
+      socket.destroy()
     })
 
     it('should run the connection callback in the correct scope', done => {
       const socket = new net.Socket()
 
       tracer.scope().activate(parent, () => {
-        socket.connect({ port }, function () {
-          expect(this).to.equal(socket)
+        socket.connect({ port }, () => {
           expect(tracer.scope().active()).to.equal(parent)
           socket.destroy()
           done()

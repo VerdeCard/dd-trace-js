@@ -1,17 +1,6 @@
 'use strict'
 
-const Http2ServerPlugin = require('./server')
-const Http2ClientPlugin = require('./client')
-const CompositePlugin = require('../../dd-trace/src/plugins/composite')
+const client = require('./client')
+const server = require('./server')
 
-class Http2Plugin extends CompositePlugin {
-  static get id () { return 'http2' }
-  static get plugins () {
-    return {
-      server: Http2ServerPlugin,
-      client: Http2ClientPlugin
-    }
-  }
-}
-
-module.exports = Http2Plugin
+module.exports = [].concat(client, server)

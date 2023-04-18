@@ -1,8 +1,8 @@
-const cp = require('child_process')
+const { execSync } = require('child_process')
 
 const sanitizedExec = (cmd, options = {}) => {
   try {
-    return cp.execSync(cmd, options).toString().replace(/(\r\n|\n|\r)/gm, '')
+    return execSync(cmd, options).toString().replace(/(\r\n|\n|\r)/gm, '')
   } catch (e) {
     return ''
   }

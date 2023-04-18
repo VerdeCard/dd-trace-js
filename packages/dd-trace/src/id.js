@@ -1,30 +1,30 @@
 'use strict'
 
-const { randomFillSync } = require('crypto')
+const { randomBytes } = require('crypto')
 
 const UINT_MAX = 4294967296
 
-const data = new Uint8Array(8 * 8192)
 const zeroId = new Uint8Array(8)
+
+// Cryptographically secure local seeds to mitigate Math.random() seed reuse.
+const seed = new Uint32Array(randomBytes(8).buffer)
 
 const map = Array.prototype.map
 const pad = byte => `${byte < 16 ? '0' : ''}${byte.toString(16)}`
 
-let batch = 0
-
 // Internal representation of a trace or span ID.
 class Identifier {
-  constructor (value, radix = 16) {
+  constructor (value, radix) {
     this._isUint64BE = true // msgpack-lite compatibility
-    this._buffer = radix === 16
-      ? createBuffer(value)
-      : fromString(value, radix)
+    this._buffer = typeof radix === 'number'
+      ? fromString(value, radix)
+      : createBuffer(value)
   }
 
-  toString (radix = 16) {
-    return radix === 16
-      ? toHexString(this._buffer)
-      : toNumberString(this._buffer, radix)
+  toString (radix) {
+    return typeof radix === 'number'
+      ? toNumberString(this._buffer, radix)
+      : toHexString(this._buffer)
   }
 
   toBuffer () {
@@ -36,7 +36,7 @@ class Identifier {
     if (this._buffer.length === 8) {
       return this._buffer
     }
-    return this._buffer.slice(-8)
+    return this._buffer.subarray(-8)
   }
 
   toJSON () {
@@ -49,13 +49,10 @@ function createBuffer (value) {
   if (value === '0') return zeroId
   if (!value) return pseudoRandom()
 
-  const size = Math.ceil(value.length / 16) * 16
-  const bytes = size / 2
-  const buffer = new Array(bytes)
+  const size = Math.ceil(value.length / 2)
+  const buffer = new Uint8Array(size)
 
-  value = value.padStart(size, '0')
-
-  for (let i = 0; i < bytes; i++) {
+  for (let i = 0; i < size; i++) {
     buffer[i] = parseInt(value.substring(i * 2, i * 2 + 2), 16)
   }
 
@@ -64,7 +61,7 @@ function createBuffer (value) {
 
 // Convert a numerical string to a buffer using the specified radix.
 function fromString (str, raddix) {
-  const buffer = new Array(8)
+  const buffer = new Uint8Array(8)
   const len = str.length
 
   let pos = 0
@@ -103,8 +100,8 @@ function fromString (str, raddix) {
 
 // Convert a buffer to a numerical string.
 function toNumberString (buffer, radix) {
-  let high = readInt32(buffer, buffer.length - 8)
-  let low = readInt32(buffer, buffer.length - 4)
+  let high = readInt32(buffer, 0)
+  let low = readInt32(buffer, 4)
   let str = ''
 
   radix = radix || 10
@@ -129,24 +126,20 @@ function toHexString (buffer) {
 
 // Simple pseudo-random 64-bit ID generator.
 function pseudoRandom () {
-  if (batch === 0) {
-    randomFillSync(data)
-  }
+  const buffer = new Uint8Array(8)
 
-  batch = (batch + 1) % 8192
+  const hi = randomUInt32(seed[0]) & 0x7FFFFFFF // only positive int64
+  const lo = randomUInt32(seed[1])
 
-  const offset = batch * 8
+  writeUInt32BE(buffer, hi, 0)
+  writeUInt32BE(buffer, lo, 4)
 
-  return [
-    data[offset] & 0x7F, // only positive int64,
-    data[offset + 1],
-    data[offset + 2],
-    data[offset + 3],
-    data[offset + 4],
-    data[offset + 5],
-    data[offset + 6],
-    data[offset + 7]
-  ]
+  return buffer
+}
+
+// Generate a random unsigned 32-bit integer.
+function randomUInt32 (seed) {
+  return seed ^ Math.floor(Math.random() * (0xFFFFFFFF + 1))
 }
 
 // Read a buffer to unsigned integer bytes.

@@ -1,7 +1,10 @@
 'use strict'
 
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
 const { setup } = require('./spec_helpers')
+
+wrapIt()
 
 const queueOptions = {
   QueueName: 'SQS_QUEUE_NAME',
@@ -14,13 +17,11 @@ describe('Plugin', () => {
   describe('aws-sdk (sqs)', function () {
     setup()
 
-    withVersions('aws-sdk', ['aws-sdk', '@aws-sdk/smithy-client'], (version, moduleName) => {
+    withVersions(plugin, 'aws-sdk', version => {
       let AWS
       let sqs
       let QueueUrl
       let tracer
-
-      const sqsClientName = moduleName === '@aws-sdk/smithy-client' ? '@aws-sdk/client-sqs' : 'aws-sdk'
 
       describe('without configuration', () => {
         before(() => {
@@ -30,9 +31,11 @@ describe('Plugin', () => {
         })
 
         before(done => {
-          AWS = require(`../../../versions/${sqsClientName}@${version}`).get()
+          AWS = require(`../../../versions/aws-sdk@${version}`).get()
 
-          sqs = new AWS.SQS({ endpoint: 'http://127.0.0.1:4566', region: 'us-east-1' })
+          const endpoint = new AWS.Endpoint('http://localhost:4576')
+
+          sqs = new AWS.SQS({ endpoint, region: 'us-east-1' })
           sqs.createQueue(queueOptions, (err, res) => {
             if (err) return done(err)
 
@@ -47,7 +50,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         it('should propagate the tracing context from the producer to the consumer', (done) => {
@@ -110,32 +113,6 @@ describe('Plugin', () => {
             })
           })
         })
-
-        it('should run the consumer in the context of its span, for async functions', (done) => {
-          sqs.sendMessage({
-            MessageBody: 'test body',
-            QueueUrl
-          }, (err) => {
-            if (err) return done(err)
-
-            const beforeSpan = tracer.scope().active()
-
-            sqs.receiveMessage({
-              QueueUrl,
-              MessageAttributeNames: ['.*']
-            }, (err) => {
-              if (err) return done(err)
-
-              const span = tracer.scope().active()
-
-              expect(span).to.not.equal(beforeSpan)
-              return Promise.resolve().then(() => {
-                expect(tracer.scope().active()).to.equal(span)
-                done()
-              })
-            })
-          })
-        })
       })
 
       describe('with configuration', () => {
@@ -150,9 +127,11 @@ describe('Plugin', () => {
         })
 
         before(done => {
-          AWS = require(`../../../versions/${sqsClientName}@${version}`).get()
+          AWS = require(`../../../versions/aws-sdk@${version}`).get()
 
-          sqs = new AWS.SQS({ endpoint: 'http://127.0.0.1:4566', region: 'us-east-1' })
+          const endpoint = new AWS.Endpoint('http://localhost:4576')
+
+          sqs = new AWS.SQS({ endpoint, region: 'us-east-1' })
           sqs.createQueue(queueOptions, (err, res) => {
             if (err) return done(err)
 
@@ -167,7 +146,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         it('should allow disabling a specific span kind of a service', (done) => {
@@ -178,7 +157,7 @@ describe('Plugin', () => {
 
             expect(span).to.include({
               name: 'aws.request',
-              resource: `sendMessage ${QueueUrl}`
+              resource: 'sendMessage http://localhost:4576/queue/SQS_QUEUE_NAME'
             })
 
             total++
@@ -189,7 +168,7 @@ describe('Plugin', () => {
 
             expect(span).to.include({
               name: 'aws.request',
-              resource: `receiveMessage ${QueueUrl}`
+              resource: 'receiveMessage http://localhost:4576/queue/SQS_QUEUE_NAME'
             })
 
             total++

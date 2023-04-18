@@ -2,25 +2,19 @@
 
 const constants = require('./constants')
 const tags = require('../../../ext/tags')
+const log = require('./log')
 const id = require('./id')
 const { isError } = require('./util')
 
 const SAMPLING_PRIORITY_KEY = constants.SAMPLING_PRIORITY_KEY
+const ANALYTICS_KEY = constants.ANALYTICS_KEY
 const SAMPLING_RULE_DECISION = constants.SAMPLING_RULE_DECISION
 const SAMPLING_LIMIT_DECISION = constants.SAMPLING_LIMIT_DECISION
 const SAMPLING_AGENT_DECISION = constants.SAMPLING_AGENT_DECISION
-const SPAN_SAMPLING_MECHANISM = constants.SPAN_SAMPLING_MECHANISM
-const SPAN_SAMPLING_RULE_RATE = constants.SPAN_SAMPLING_RULE_RATE
-const SPAN_SAMPLING_MAX_PER_SECOND = constants.SPAN_SAMPLING_MAX_PER_SECOND
-const SAMPLING_MECHANISM_SPAN = constants.SAMPLING_MECHANISM_SPAN
+const ANALYTICS = tags.ANALYTICS
 const MEASURED = tags.MEASURED
 const ORIGIN_KEY = constants.ORIGIN_KEY
 const HOSTNAME_KEY = constants.HOSTNAME_KEY
-const TOP_LEVEL_KEY = constants.TOP_LEVEL_KEY
-const PROCESS_ID = constants.PROCESS_ID
-const ERROR_MESSAGE = constants.ERROR_MESSAGE
-const ERROR_STACK = constants.ERROR_STACK
-const ERROR_TYPE = constants.ERROR_TYPE
 
 const map = {
   'service.name': 'service',
@@ -31,9 +25,10 @@ const map = {
 function format (span) {
   const formatted = formatSpan(span)
 
+  extractError(formatted, span)
   extractRootTags(formatted, span)
-  extractChunkTags(formatted, span)
   extractTags(formatted, span)
+  extractAnalytics(formatted, span)
 
   return formatted
 }
@@ -45,8 +40,8 @@ function formatSpan (span) {
     trace_id: spanContext._traceId,
     span_id: spanContext._spanId,
     parent_id: spanContext._parentId || id('0'),
-    name: String(spanContext._name),
-    resource: String(spanContext._name),
+    name: serialize(spanContext._name),
+    resource: serialize(spanContext._name),
     error: 0,
     meta: {},
     metrics: {},
@@ -55,19 +50,13 @@ function formatSpan (span) {
   }
 }
 
-function setSingleSpanIngestionTags (span, options) {
-  if (!options) return
-  addTag({}, span.metrics, SPAN_SAMPLING_MECHANISM, SAMPLING_MECHANISM_SPAN)
-  addTag({}, span.metrics, SPAN_SAMPLING_RULE_RATE, options.sampleRate)
-  addTag({}, span.metrics, SPAN_SAMPLING_MAX_PER_SECOND, options.maxPerSecond)
-}
-
 function extractTags (trace, span) {
   const context = span.context()
   const origin = context._trace.origin
   const tags = context._tags
   const hostname = context._hostname
   const priority = context._sampling.priority
+  const internalErrors = span.tracer()._internalErrors
 
   if (tags['span.kind'] && tags['span.kind'] !== 'internal') {
     addTag({}, trace.metrics, MEASURED, 1)
@@ -85,32 +74,32 @@ function extractTags (trace, span) {
         addTag(trace.meta, {}, tag, tags[tag] && String(tags[tag]))
         break
       case HOSTNAME_KEY:
+      case ANALYTICS:
+        break
       case MEASURED:
         addTag({}, trace.metrics, tag, tags[tag] === undefined || tags[tag] ? 1 : 0)
         break
       case 'error':
-        if (context._name !== 'fs.operation') {
-          extractError(trace, tags[tag])
+        if (tags[tag] && (context._name !== 'fs.operation' || internalErrors)) {
+          trace.error = 1
         }
         break
-      case ERROR_TYPE:
-      case ERROR_MESSAGE:
-      case ERROR_STACK:
+      case 'error.type':
+      case 'error.msg':
+      case 'error.stack':
         // HACK: remove when implemented in the backend
-        if (context._name !== 'fs.operation') {
+        if (context._name !== 'fs.operation' || internalErrors) {
           trace.error = 1
-        } else {
-          break
         }
       default: // eslint-disable-line no-fallthrough
         addTag(trace.meta, trace.metrics, tag, tags[tag])
     }
   }
 
-  setSingleSpanIngestionTags(trace, context._sampling.spanSampling)
+  if (span.tracer()._service === tags['service.name']) {
+    addTag(trace.meta, trace.metrics, 'language', 'javascript')
+  }
 
-  addTag(trace.meta, trace.metrics, 'language', 'javascript')
-  addTag(trace.meta, trace.metrics, PROCESS_ID, process.pid)
   addTag(trace.meta, trace.metrics, SAMPLING_PRIORITY_KEY, priority)
   addTag(trace.meta, trace.metrics, ORIGIN_KEY, origin)
   addTag(trace.meta, trace.metrics, HOSTNAME_KEY, hostname)
@@ -126,33 +115,32 @@ function extractRootTags (trace, span) {
   addTag({}, trace.metrics, SAMPLING_RULE_DECISION, context._trace[SAMPLING_RULE_DECISION])
   addTag({}, trace.metrics, SAMPLING_LIMIT_DECISION, context._trace[SAMPLING_LIMIT_DECISION])
   addTag({}, trace.metrics, SAMPLING_AGENT_DECISION, context._trace[SAMPLING_AGENT_DECISION])
-  addTag({}, trace.metrics, TOP_LEVEL_KEY, 1)
 }
 
-function extractChunkTags (trace, span) {
-  const context = span.context()
-  const isLocalRoot = span === context._trace.started[0]
-
-  if (!isLocalRoot) return
-
-  for (const key in context._trace.tags) {
-    addTag(trace.meta, trace.metrics, key, context._trace.tags[key])
-  }
-}
-
-function extractError (trace, error) {
-  if (!error) return
-
-  trace.error = 1
-
+function extractError (trace, span) {
+  const error = span.context()._tags['error']
   if (isError(error)) {
-    addTag(trace.meta, trace.metrics, ERROR_MESSAGE, error.message)
-    addTag(trace.meta, trace.metrics, ERROR_TYPE, error.name)
-    addTag(trace.meta, trace.metrics, ERROR_STACK, error.stack)
+    addTag(trace.meta, trace.metrics, 'error.msg', error.message)
+    addTag(trace.meta, trace.metrics, 'error.type', error.name)
+    addTag(trace.meta, trace.metrics, 'error.stack', error.stack)
   }
 }
 
-function addTag (meta, metrics, key, value, nested) {
+function extractAnalytics (trace, span) {
+  let analytics = span.context()._tags[ANALYTICS]
+
+  if (analytics === true) {
+    analytics = 1
+  } else {
+    analytics = parseFloat(analytics)
+  }
+
+  if (!isNaN(analytics)) {
+    trace.metrics[ANALYTICS_KEY] = Math.max(Math.min(analytics, 1), 0)
+  }
+}
+
+function addTag (meta, metrics, key, value, seen) {
   switch (typeof value) {
     case 'string':
       if (!value) break
@@ -162,9 +150,6 @@ function addTag (meta, metrics, key, value, nested) {
       if (isNaN(value)) break
       metrics[key] = value
       break
-    case 'boolean':
-      metrics[key] = value ? 1 : 0
-      break
     case 'undefined':
       break
     case 'object':
@@ -173,20 +158,42 @@ function addTag (meta, metrics, key, value, nested) {
       // Special case for Node.js Buffer and URL
       if (isNodeBuffer(value) || isUrl(value)) {
         metrics[key] = value.toString()
-      } else if (!Array.isArray(value) && !nested) {
-        for (const prop in value) {
-          if (!hasOwn(value, prop)) continue
-
-          addTag(meta, metrics, `${key}.${prop}`, value[prop], true)
-        }
+        break
       }
 
-      break
+      if (!Array.isArray(value)) {
+        addObjectTag(meta, metrics, key, value, seen)
+        break
+      }
+
+    default: // eslint-disable-line no-fallthrough
+      addTag(meta, metrics, key, serialize(value))
   }
 }
 
-function hasOwn (object, prop) {
-  return Object.prototype.hasOwnProperty.call(object, prop)
+function addObjectTag (meta, metrics, key, value, seen) {
+  seen = seen || []
+
+  if (~seen.indexOf(value)) {
+    meta[key] = '[Circular]'
+    return
+  }
+
+  seen.push(value)
+
+  for (const prop in value) {
+    addTag(meta, metrics, `${key}.${prop}`, value[prop], seen)
+  }
+
+  seen.pop()
+}
+
+function serialize (obj) {
+  try {
+    return obj && typeof obj.toString !== 'function' ? JSON.stringify(obj) : String(obj)
+  } catch (e) {
+    log.error(e)
+  }
 }
 
 function isNodeBuffer (obj) {

@@ -9,6 +9,7 @@ class NoopSpanContext extends DatadogSpanContext {
   constructor (props) {
     super(props)
 
+    this._traceFlags.sampled = false
     this._sampling.priority = USER_REJECT
   }
 }

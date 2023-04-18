@@ -2,11 +2,14 @@
 
 const agent = require('../../dd-trace/test/plugins/agent')
 const getPort = require('get-port')
+const plugin = require('../src/client')
 const Readable = require('stream').Readable
+const kinds = require('../src/kinds')
 const getService = require('./service')
 const loader = require('../../../versions/@grpc/proto-loader').get()
 const pkgs = ['grpc', '@grpc/grpc-js']
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
+
+wrapIt()
 
 describe('Plugin', () => {
   let grpc
@@ -75,7 +78,7 @@ describe('Plugin', () => {
       server.forceShutdown()
     })
 
-    withVersions('grpc', pkgs, (version, pkg) => {
+    withVersions(plugin, pkgs, (version, pkg) => {
       for (const clientName in clientBuilders) {
         const buildClient = clientBuilders[clientName]
 
@@ -90,7 +93,7 @@ describe('Plugin', () => {
             })
 
             after(() => {
-              return agent.close({ ritmReset: false })
+              return agent.close()
             })
 
             it('should handle `unary` calls', async () => {
@@ -103,8 +106,8 @@ describe('Plugin', () => {
               return agent
                 .use(traces => {
                   expect(traces[0][0]).to.deep.include({
-                    name: 'grpc.client',
-                    service: 'test',
+                    name: 'grpc.request',
+                    service: 'test-grpc-client',
                     resource: '/test.TestService/getUnary',
                     type: 'http'
                   })
@@ -114,7 +117,7 @@ describe('Plugin', () => {
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getUnary',
-                    'grpc.method.kind': 'unary',
+                    'grpc.method.kind': kinds.unary,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
@@ -139,8 +142,8 @@ describe('Plugin', () => {
               return agent
                 .use(traces => {
                   expect(traces[0][0]).to.deep.include({
-                    name: 'grpc.client',
-                    service: 'test',
+                    name: 'grpc.request',
+                    service: 'test-grpc-client',
                     resource: '/test.TestService/getServerStream',
                     type: 'http'
                   })
@@ -150,7 +153,7 @@ describe('Plugin', () => {
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getServerStream',
-                    'grpc.method.kind': 'server_streaming',
+                    'grpc.method.kind': kinds.server_stream,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
@@ -173,8 +176,8 @@ describe('Plugin', () => {
               return agent
                 .use(traces => {
                   expect(traces[0][0]).to.deep.include({
-                    name: 'grpc.client',
-                    service: 'test',
+                    name: 'grpc.request',
+                    service: 'test-grpc-client',
                     resource: '/test.TestService/getClientStream',
                     type: 'http'
                   })
@@ -184,7 +187,7 @@ describe('Plugin', () => {
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getClientStream',
-                    'grpc.method.kind': 'client_streaming',
+                    'grpc.method.kind': kinds.client_stream,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
@@ -207,18 +210,17 @@ describe('Plugin', () => {
               return agent
                 .use(traces => {
                   expect(traces[0][0]).to.deep.include({
-                    name: 'grpc.client',
-                    service: 'test',
+                    name: 'grpc.request',
+                    service: 'test-grpc-client',
                     resource: '/test.TestService/getBidi',
                     type: 'http'
                   })
                   expect(traces[0][0].meta).to.have.property('grpc.method.name', 'getBidi')
                   expect(traces[0][0].meta).to.have.property('grpc.method.service', 'TestService')
                   expect(traces[0][0].meta).to.have.property('grpc.method.path', '/test.TestService/getBidi')
-                  expect(traces[0][0].meta).to.have.property('grpc.method.kind', 'bidi_streaming')
+                  expect(traces[0][0].meta).to.have.property('grpc.method.kind', kinds.bidi)
                   expect(traces[0][0].meta).to.have.property('span.kind', 'client')
                   expect(traces[0][0].metrics).to.have.property('grpc.status.code', 0)
-                  expect(traces[0][0].meta).to.have.property('component', 'grpc')
                 })
             })
 
@@ -279,17 +281,17 @@ describe('Plugin', () => {
                 .use(traces => {
                   expect(traces[0][0]).to.have.property('error', 1)
                   expect(traces[0][0].meta).to.include({
-                    [ERROR_MESSAGE]: '2 UNKNOWN: foobar',
-                    [ERROR_TYPE]: 'Error',
+                    'error.msg': '2 UNKNOWN: foobar',
+                    'error.type': 'Error',
                     'grpc.method.name': 'getUnary',
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getUnary',
-                    'grpc.method.kind': 'unary',
+                    'grpc.method.kind': kinds.unary,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
-                  expect(traces[0][0].meta).to.have.property(ERROR_STACK)
+                  expect(traces[0][0].meta).to.have.property('error.stack')
                   expect(traces[0][0].metrics).to.have.property('grpc.status.code', 2)
                 })
             })
@@ -307,17 +309,17 @@ describe('Plugin', () => {
                 .use(traces => {
                   expect(traces[0][0]).to.have.property('error', 1)
                   expect(traces[0][0].meta).to.include({
-                    [ERROR_TYPE]: 'Error',
+                    'error.type': 'Error',
                     'grpc.method.name': 'getUnary',
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getUnary',
-                    'grpc.method.kind': 'unary',
+                    'grpc.method.kind': kinds.unary,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
-                  expect(traces[0][0].meta).to.have.property(ERROR_STACK)
-                  expect(traces[0][0].meta[ERROR_MESSAGE]).to.match(/^13 INTERNAL:.+$/)
+                  expect(traces[0][0].meta).to.have.property('error.stack')
+                  expect(traces[0][0].meta['error.msg']).to.match(/^13 INTERNAL:.+$/)
                   expect(traces[0][0].metrics).to.have.property('grpc.status.code', 13)
                 })
             })
@@ -340,8 +342,8 @@ describe('Plugin', () => {
               return agent
                 .use(traces => {
                   expect(traces[0][0]).to.deep.include({
-                    name: 'grpc.client',
-                    service: 'test',
+                    name: 'grpc.request',
+                    service: 'test-grpc-client',
                     resource: '/test.TestService/getUnary'
                   })
 
@@ -350,7 +352,7 @@ describe('Plugin', () => {
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getUnary',
-                    'grpc.method.kind': 'unary',
+                    'grpc.method.kind': kinds.unary,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
@@ -371,8 +373,8 @@ describe('Plugin', () => {
               return agent
                 .use(traces => {
                   expect(traces[0][0]).to.deep.include({
-                    name: 'grpc.client',
-                    service: 'test',
+                    name: 'grpc.request',
+                    service: 'test-grpc-client',
                     resource: '/test.TestService/getUnary'
                   })
 
@@ -381,7 +383,7 @@ describe('Plugin', () => {
                     'grpc.method.service': 'TestService',
                     'grpc.method.package': 'test',
                     'grpc.method.path': '/test.TestService/getUnary',
-                    'grpc.method.kind': 'unary',
+                    'grpc.method.kind': kinds.unary,
                     'span.kind': 'client',
                     'component': 'grpc'
                   })
@@ -442,9 +444,9 @@ describe('Plugin', () => {
                   stream.end()
                 }
               }).then(client => {
-                tracer.scope().activate(span, () => {
-                  const call = client.getServerStream({ first: 'foobar' })
+                const call = client.getServerStream({ first: 'foobar' })
 
+                tracer.scope().activate(span, () => {
                   call.on('data', () => {
                     expect(tracer.scope().active()).to.equal(span)
                     done()
@@ -470,7 +472,7 @@ describe('Plugin', () => {
             })
 
             after(() => {
-              return agent.close({ ritmReset: false })
+              return agent.close()
             })
 
             it('should be configured with the correct values', async () => {
@@ -505,7 +507,7 @@ describe('Plugin', () => {
             })
 
             after(() => {
-              return agent.close({ ritmReset: false })
+              return agent.close()
             })
 
             it('should handle request metadata', async () => {
@@ -561,7 +563,7 @@ describe('Plugin', () => {
             })
 
             after(() => {
-              return agent.close({ ritmReset: false })
+              return agent.close()
             })
 
             it('should handle request metadata', async () => {

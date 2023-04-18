@@ -1,12 +1,12 @@
 'use strict'
 
 const net = require('net')
-const { port, reqs } = require('./common')
+const { port } = require('./common')
 
 let connectionsMade = 0
 
 const server = net.createServer(c => {
-  if (++connectionsMade === reqs) {
+  if (++connectionsMade === 10000) {
     c.on('end', () => server.close())
   }
   c.pipe(c)

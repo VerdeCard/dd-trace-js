@@ -1,38 +1,22 @@
 'use strict'
 
-require('./setup/tap')
-
 describe('TracerProxy', () => {
   let Proxy
   let proxy
   let DatadogTracer
   let NoopTracer
-  let AppsecSdk
-  let NoopAppsecSdk
   let tracer
-  let NoopProxy
   let noop
-  let appsecSdk
-  let noopAppsecSdk
+  let Instrumenter
+  let instrumenter
   let Config
   let config
   let metrics
+  let analyticsSampler
   let log
   let profiler
-  let appsec
-  let telemetry
-  let iast
-  let remoteConfig
 
   beforeEach(() => {
-    process.env.DD_TRACE_MOCHA_ENABLED = false
-
-    appsecSdk = {
-      trackUserLoginSuccessEvent: sinon.stub(),
-      trackUserLoginFailureEvent: sinon.stub(),
-      trackCustomEvent: sinon.stub()
-    }
-
     tracer = {
       use: sinon.stub().returns('tracer'),
       trace: sinon.stub().returns('test'),
@@ -40,6 +24,8 @@ describe('TracerProxy', () => {
       startSpan: sinon.stub().returns('span'),
       inject: sinon.stub().returns('tracer'),
       extract: sinon.stub().returns('spanContext'),
+      currentSpan: sinon.stub().returns('current'),
+      scopeManager: sinon.stub().returns('scopeManager'),
       setUrl: sinon.stub()
     }
 
@@ -50,35 +36,32 @@ describe('TracerProxy', () => {
       startSpan: sinon.stub().returns('span'),
       inject: sinon.stub().returns('noop'),
       extract: sinon.stub().returns('spanContext'),
+      currentSpan: sinon.stub().returns('current'),
+      scopeManager: sinon.stub().returns('scopeManager'),
       setUrl: sinon.stub()
     }
 
-    noopAppsecSdk = {
-      trackUserLoginSuccessEvent: sinon.stub(),
-      trackUserLoginFailureEvent: sinon.stub(),
-      trackCustomEvent: sinon.stub()
+    log = {
+      use: sinon.spy(),
+      toggle: sinon.spy(),
+      error: sinon.spy()
     }
 
-    log = {
-      error: sinon.spy()
+    instrumenter = {
+      enable: sinon.spy(),
+      patch: sinon.spy(),
+      use: sinon.spy()
     }
 
     DatadogTracer = sinon.stub().returns(tracer)
     NoopTracer = sinon.stub().returns(noop)
-    AppsecSdk = sinon.stub().returns(appsecSdk)
-    NoopAppsecSdk = sinon.stub().returns(noopAppsecSdk)
+    Instrumenter = sinon.stub().returns(instrumenter)
 
     config = {
-      tracing: true,
+      enabled: true,
       experimental: {},
       logger: 'logger',
-      debug: true,
-      profiling: {},
-      appsec: {},
-      iast: {},
-      remoteConfig: {
-        enabled: true
-      }
+      debug: true
     }
     Config = sinon.stub().returns(config)
 
@@ -86,46 +69,35 @@ describe('TracerProxy', () => {
       start: sinon.spy()
     }
 
+    analyticsSampler = {
+      enable: sinon.spy()
+    }
+
     profiler = {
       start: sinon.spy()
     }
 
-    appsec = {
-      enable: sinon.spy()
-    }
-
-    telemetry = {
-      start: sinon.spy()
-    }
-
-    iast = {
-      enable: sinon.spy()
-    }
-
-    remoteConfig = {
-      enable: sinon.spy()
-    }
-
-    NoopProxy = proxyquire('../src/noop/proxy', {
-      './tracer': NoopTracer,
-      '../appsec/sdk/noop': NoopAppsecSdk
-    })
-
     Proxy = proxyquire('../src/proxy', {
       './tracer': DatadogTracer,
-      './noop/proxy': NoopProxy,
+      './noop/tracer': NoopTracer,
       './config': Config,
       './metrics': metrics,
+      './analytics_sampler': analyticsSampler,
+      './instrumenter': Instrumenter,
       './log': log,
-      './profiler': profiler,
-      './appsec': appsec,
-      './appsec/iast': iast,
-      './telemetry': telemetry,
-      './appsec/remote_config': remoteConfig,
-      './appsec/sdk': AppsecSdk
+      './profiler': profiler
     })
 
     proxy = new Proxy()
+  })
+
+  describe('use', () => {
+    it('should call the underlying instrumenter', () => {
+      const returnValue = proxy.use('a', 'b', 'c')
+
+      expect(instrumenter.use).to.have.been.calledWith('a', 'b', 'c')
+      expect(returnValue).to.equal(proxy)
+    })
   })
 
   describe('uninitialized', () => {
@@ -141,7 +113,6 @@ describe('TracerProxy', () => {
 
         expect(Config).to.have.been.calledWith(options)
         expect(DatadogTracer).to.have.been.calledWith(config)
-        expect(remoteConfig.enable).to.have.been.calledOnceWith(config)
       })
 
       it('should not initialize twice', () => {
@@ -149,24 +120,33 @@ describe('TracerProxy', () => {
         proxy.init()
 
         expect(DatadogTracer).to.have.been.calledOnce
-        expect(remoteConfig.enable).to.have.been.calledOnce
-      })
-
-      it('should not enable remote config when disabled', () => {
-        config.remoteConfig.enabled = false
-
-        proxy.init()
-
-        expect(DatadogTracer).to.have.been.calledOnce
-        expect(remoteConfig.enable).to.not.have.been.called
       })
 
       it('should not initialize when disabled', () => {
-        config.tracing = false
+        config.enabled = false
 
         proxy.init()
 
         expect(DatadogTracer).to.not.have.been.called
+      })
+
+      it('should support logging', () => {
+        proxy.init()
+
+        expect(log.use).to.have.been.calledWith(config.logger)
+        expect(log.toggle).to.have.been.calledWith(config.debug)
+      })
+
+      it('should set up automatic instrumentation', () => {
+        proxy.init()
+
+        expect(instrumenter.enable).to.have.been.called
+      })
+
+      it('should update the delegate before setting up instrumentation', () => {
+        proxy.init()
+
+        expect(instrumenter.enable).to.have.been.calledAfter(DatadogTracer)
       })
 
       it('should not capture metrics by default', () => {
@@ -183,36 +163,12 @@ describe('TracerProxy', () => {
         expect(metrics.start).to.have.been.called
       })
 
-      it('should enable appsec when explicitly configured to true', () => {
-        config.appsec = { enabled: true }
+      it('should enable the analytics sampler when configured', () => {
+        config.analytics = true
 
         proxy.init()
 
-        expect(appsec.enable).to.have.been.called
-      })
-
-      it('should not enable appsec when explicitly configured to false', () => {
-        config.appsec = { enabled: false }
-
-        proxy.init()
-
-        expect(appsec.enable).to.not.have.been.called
-      })
-
-      it('should enable iast when configured', () => {
-        config.iast = { enabled: true }
-
-        proxy.init()
-
-        expect(iast.enable).to.have.been.calledOnce
-      })
-
-      it('should not enable iast when it is not configured', () => {
-        config.iast = {}
-
-        proxy.init()
-
-        expect(iast.enable).not.to.have.been.called
+        expect(analyticsSampler.enable).to.have.been.called
       })
 
       it('should not load the profiler when not configured', () => {
@@ -247,10 +203,9 @@ describe('TracerProxy', () => {
           './noop/tracer': NoopTracer,
           './config': Config,
           './metrics': metrics,
+          './instrumenter': Instrumenter,
           './log': log,
-          './profiler': null, // this will cause the import failure error
-          './appsec': appsec,
-          './appsec/remote_config': remoteConfig
+          './profiler': null // this will cause the import failure error
         })
 
         const profilerImportFailureProxy = new ProfilerImportFailureProxy()
@@ -258,12 +213,6 @@ describe('TracerProxy', () => {
 
         const expectedErr = sinon.match.instanceOf(Error).and(sinon.match.has('code', 'MODULE_NOT_FOUND'))
         sinon.assert.calledWith(log.error, sinon.match(expectedErr))
-      })
-
-      it('should start telemetry', () => {
-        proxy.init()
-
-        expect(telemetry.start).to.have.been.called
       })
     })
 
@@ -343,6 +292,24 @@ describe('TracerProxy', () => {
       })
     })
 
+    describe('currentSpan', () => {
+      it('should call the underlying NoopTracer', () => {
+        const returnValue = proxy.currentSpan('a', 'b', 'c')
+
+        expect(noop.currentSpan).to.have.been.calledWith('a', 'b', 'c')
+        expect(returnValue).to.equal('current')
+      })
+    })
+
+    describe('scopeManager', () => {
+      it('should call the underlying NoopTracer', () => {
+        const returnValue = proxy.scopeManager()
+
+        expect(noop.scopeManager).to.have.been.called
+        expect(returnValue).to.equal('scopeManager')
+      })
+    })
+
     describe('setUrl', () => {
       it('should call the underlying DatadogTracer', () => {
         const returnValue = proxy.setUrl('http://example.com')
@@ -351,41 +318,20 @@ describe('TracerProxy', () => {
         expect(returnValue).to.equal(proxy)
       })
     })
-
-    describe('appsec', () => {
-      describe('trackUserLoginSuccessEvent', () => {
-        it('should call the underlying NoopAppsecSdk method', () => {
-          const user = { id: 'user_id' }
-          const metadata = { metakey1: 'metavalue1' }
-          proxy.appsec.trackUserLoginSuccessEvent(user, metadata)
-          expect(noopAppsecSdk.trackUserLoginSuccessEvent).to.have.been.calledOnceWithExactly(user, metadata)
-        })
-      })
-
-      describe('trackUserLoginFailureEvent', () => {
-        it('should call the underlying NoopAppsecSdk method', () => {
-          const userId = 'user_id'
-          const exists = true
-          const metadata = { metakey1: 'metavalue1' }
-          proxy.appsec.trackUserLoginFailureEvent(userId, exists, metadata)
-          expect(noopAppsecSdk.trackUserLoginFailureEvent).to.have.been.calledOnceWithExactly(userId, exists, metadata)
-        })
-      })
-
-      describe('trackCustomEvent', () => {
-        it('should call the underlying NoopAppsecSdk method', () => {
-          const eventName = 'custom_event'
-          const metadata = { metakey1: 'metavalue1' }
-          proxy.appsec.trackCustomEvent(eventName, metadata)
-          expect(noopAppsecSdk.trackCustomEvent).to.have.been.calledOnceWithExactly(eventName, metadata)
-        })
-      })
-    })
   })
 
   describe('initialized', () => {
     beforeEach(() => {
       proxy.init()
+    })
+
+    describe('use', () => {
+      it('should call the underlying Instrumenter', () => {
+        const returnValue = proxy.use('a', 'b', 'c')
+
+        expect(instrumenter.use).to.have.been.calledWith('a', 'b', 'c')
+        expect(returnValue).to.equal(proxy)
+      })
     })
 
     describe('trace', () => {
@@ -451,42 +397,30 @@ describe('TracerProxy', () => {
       })
     })
 
+    describe('currentSpan', () => {
+      it('should call the underlying DatadogTracer', () => {
+        const returnValue = proxy.currentSpan('a', 'b', 'c')
+
+        expect(tracer.currentSpan).to.have.been.calledWith('a', 'b', 'c')
+        expect(returnValue).to.equal('current')
+      })
+    })
+
+    describe('scopeManager', () => {
+      it('should call the underlying DatadogTracer', () => {
+        const returnValue = proxy.scopeManager()
+
+        expect(tracer.scopeManager).to.have.been.called
+        expect(returnValue).to.equal('scopeManager')
+      })
+    })
+
     describe('setUrl', () => {
       it('should call the underlying DatadogTracer', () => {
         const returnValue = proxy.setUrl('http://example.com')
 
         expect(tracer.setUrl).to.have.been.calledWith('http://example.com')
         expect(returnValue).to.equal(proxy)
-      })
-    })
-
-    describe('appsec', () => {
-      describe('trackUserLoginSuccessEvent', () => {
-        it('should call the underlying AppsecSdk method', () => {
-          const user = { id: 'user_id' }
-          const metadata = { metakey1: 'metavalue1' }
-          proxy.appsec.trackUserLoginSuccessEvent(user, metadata)
-          expect(appsecSdk.trackUserLoginSuccessEvent).to.have.been.calledOnceWithExactly(user, metadata)
-        })
-      })
-
-      describe('trackUserLoginFailureEvent', () => {
-        it('should call the underlying AppsecSdk method', () => {
-          const userId = 'user_id'
-          const exists = true
-          const metadata = { metakey1: 'metavalue1' }
-          proxy.appsec.trackUserLoginFailureEvent(userId, exists, metadata)
-          expect(appsecSdk.trackUserLoginFailureEvent).to.have.been.calledOnceWithExactly(userId, exists, metadata)
-        })
-      })
-
-      describe('trackCustomEvent', () => {
-        it('should call the underlying AppsecSdk method', () => {
-          const eventName = 'custom_event'
-          const metadata = { metakey1: 'metavalue1' }
-          proxy.appsec.trackCustomEvent(eventName, metadata)
-          expect(appsecSdk.trackCustomEvent).to.have.been.calledOnceWithExactly(eventName, metadata)
-        })
       })
     })
   })

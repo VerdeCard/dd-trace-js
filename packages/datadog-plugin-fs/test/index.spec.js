@@ -9,79 +9,28 @@ const path = require('path')
 const semver = require('semver')
 const rimraf = require('rimraf')
 const util = require('util')
-const plugins = require('../../dd-trace/src/plugins')
-const { channel } = require('../../diagnostics_channel')
 
+const implicitFlag = semver.satisfies(process.versions.node, '>=11.1.0')
 const hasWritev = semver.satisfies(process.versions.node, '>=12.9.0')
 const hasOSymlink = realFS.constants.O_SYMLINK
 
+// TODO remove skips
+
 describe('Plugin', () => {
-  describe('fs not instrumented without internal method call', () => {
-    let fs
-    let tracer
-    afterEach(() => agent.close({ ritmReset: false }))
-    beforeEach(() => agent.load('fs', undefined, { flushInterval: 1 }).then(() => {
-      tracer = require('../../dd-trace')
-      fs = require('fs')
-    }))
-    describe('with parent span', () => {
-      beforeEach((done) => {
-        const parentSpan = tracer.startSpan('parent')
-        parentSpan.finish()
-        tracer.scope().activate(parentSpan, done)
-      })
-
-      describe('open', () => {
-        it('should not be instrumented', (done) => {
-          function waitForNextTrace () {
-            agent.use((data) => {
-              if (data) {
-                data.forEach((arr) => {
-                  arr.forEach((trace) => {
-                    if (trace.name === 'fs.operation') {
-                      expect.fail('should not have been any fs traces')
-                    }
-                  })
-                })
-              }
-              process.nextTick(() => {
-                waitForNextTrace()
-              })
-            }).catch(done)
-          }
-
-          waitForNextTrace()
-          setTimeout(done, 1500) // allow enough time to ensure no traces happened
-
-          fs.open(__filename, 'r+', (err, fd) => {
-            if (err) {
-              done(err)
-            } else {
-              realFS.closeSync(fd)
-            }
-          })
-        })
-      })
-    })
-  })
   describe('fs', () => {
     let fs
     let tmpdir
     let tracer
-    afterEach(() => agent.close({ ritmReset: false }))
-    beforeEach(() => agent.load('fs', undefined, { flushInterval: 1 }).then(() => {
+    afterEach(() => agent.close())
+    beforeEach(() => agent.load('fs').then(() => {
       tracer = require('../../dd-trace')
       fs = require('fs')
-      tracer.use('fs', { enabled: true })
     }))
     before(() => {
       tmpdir = realFS.mkdtempSync(path.join(os.tmpdir(), 'dd-trace-js-test'))
-      plugins['fs'] = require('../../datadog-plugin-fs/src')
-      channel('dd-trace:instrumentation:load').publish({ name: 'fs' })
     })
     after((done) => {
       rimraf(tmpdir, realFS, done)
-      delete plugins['fs']
     })
 
     describe('without parent span', () => {
@@ -120,45 +69,22 @@ describe('Plugin', () => {
           }
         })
 
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'open',
-            meta: {
-              'file.flag': 'r',
-              'file.path': __filename
-            }
-          })
+        if (implicitFlag) {
+          it('should be instrumented', (done) => {
+            expectOneSpan(agent, done, {
+              resource: 'open',
+              meta: {
+                'file.flag': 'r',
+                'file.path': __filename
+              }
+            })
 
-          fs.open(__filename, (err, _fd) => {
-            fd = _fd
-            if (err) done(err)
+            fs.open(__filename, (err, _fd) => {
+              fd = _fd
+              if (err) done(err)
+            })
           })
-        })
-      })
-
-      describe('open', () => {
-        let fd
-        afterEach(() => {
-          if (typeof fd === 'number') {
-            realFS.closeSync(fd)
-            fd = undefined
-          }
-        })
-
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'open',
-            meta: {
-              'file.flag': 'r',
-              'file.path': __filename
-            }
-          })
-
-          fs.open(__filename, (err, _fd) => {
-            fd = _fd
-            if (err) done(err)
-          })
-        })
+        }
 
         it('should be instrumented with flags', (done) => {
           expectOneSpan(agent, done, {
@@ -183,7 +109,10 @@ describe('Plugin', () => {
               error: 0,
               meta: {
                 'file.flag': 'r',
-                'file.path': filename
+                'file.path': filename,
+                'error.msg': err.message,
+                'error.type': err.name,
+                'error.stack': err.stack
               }
             })
           })
@@ -200,19 +129,21 @@ describe('Plugin', () => {
             }
           })
 
-          it('should be instrumented', (done) => {
-            expectOneSpan(agent, done, {
-              resource: 'promises.open',
-              meta: {
-                'file.flag': 'r',
-                'file.path': __filename
-              }
-            })
+          if (implicitFlag) {
+            it('should be instrumented', (done) => {
+              expectOneSpan(agent, done, {
+                resource: 'promises.open',
+                meta: {
+                  'file.flag': 'r',
+                  'file.path': __filename
+                }
+              })
 
-            fs.promises.open(__filename).then(_fd => {
-              fd = _fd
-            }, done)
-          })
+              fs.promises.open(__filename).then(_fd => {
+                fd = _fd
+              }, done)
+            })
+          }
 
           it('should be instrumented with flags', (done) => {
             expectOneSpan(agent, done, {
@@ -236,7 +167,10 @@ describe('Plugin', () => {
                 error: 0,
                 meta: {
                   'file.flag': 'r',
-                  'file.path': filename
+                  'file.path': filename,
+                  'error.msg': err.message,
+                  'error.type': err.name,
+                  'error.stack': err.stack
                 }
               })
             })
@@ -253,17 +187,19 @@ describe('Plugin', () => {
           }
         })
 
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'openSync',
-            meta: {
-              'file.flag': 'r',
-              'file.path': __filename
-            }
-          })
+        if (implicitFlag) {
+          it('should be instrumented', (done) => {
+            expectOneSpan(agent, done, {
+              resource: 'openSync',
+              meta: {
+                'file.flag': 'r',
+                'file.path': __filename
+              }
+            })
 
-          fd = fs.openSync(__filename)
-        })
+            fd = fs.openSync(__filename)
+          })
+        }
 
         it('should be instrumented with flags', (done) => {
           expectOneSpan(agent, done, {
@@ -287,7 +223,10 @@ describe('Plugin', () => {
               error: 0,
               meta: {
                 'file.flag': 'r',
-                'file.path': filename
+                'file.path': filename,
+                'error.msg': err.message,
+                'error.type': err.name,
+                'error.stack': err.stack
               }
             })
           }
@@ -312,17 +251,19 @@ describe('Plugin', () => {
       })
 
       describeThreeWays('readFile', (resource, tested) => {
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource,
-            meta: {
-              'file.flag': 'r',
-              'file.path': __filename
-            }
-          })
+        if (implicitFlag) {
+          it('should be instrumented', (done) => {
+            expectOneSpan(agent, done, {
+              resource,
+              meta: {
+                'file.flag': 'r',
+                'file.path': __filename
+              }
+            })
 
-          tested(fs, [__filename], done)
-        })
+            tested(fs, [__filename], done)
+          })
+        }
 
         it('should be instrumented with flags', (done) => {
           expectOneSpan(agent, done, {
@@ -363,17 +304,19 @@ describe('Plugin', () => {
           } catch (e) { /* */ }
         })
 
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource,
-            meta: {
-              'file.flag': 'w',
-              'file.path': filename
-            }
-          })
+        if (implicitFlag) {
+          it('should be instrumented', (done) => {
+            expectOneSpan(agent, done, {
+              resource,
+              meta: {
+                'file.flag': 'w',
+                'file.path': filename
+              }
+            })
 
-          tested(fs, [filename, 'test'], done)
-        })
+            tested(fs, [filename, 'test'], done)
+          })
+        }
 
         it('should be instrumented with flags', (done) => {
           expectOneSpan(agent, done, {
@@ -666,17 +609,6 @@ describe('Plugin', () => {
           fs.createReadStream(__filename).on('error', done).resume()
         })
 
-        it('should be instrumented when closed', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'ReadStream',
-            meta: {
-              'file.path': __filename,
-              'file.flag': 'r+'
-            }
-          })
-          fs.createReadStream(__filename, { flags: 'r+' }).on('error', done).destroy()
-        })
-
         it('should be instrumented with flags', (done) => {
           expectOneSpan(agent, done, {
             resource: 'ReadStream',
@@ -715,18 +647,6 @@ describe('Plugin', () => {
           })
 
           fs.createWriteStream(filename).on('error', done).end()
-        })
-
-        it('should be instrumented when closed', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'WriteStream',
-            meta: {
-              'file.path': filename,
-              'file.flag': 'w'
-            }
-          })
-
-          fs.createWriteStream(filename).on('error', done).destroy()
         })
 
         it('should be instrumented with flags', (done) => {
@@ -1358,50 +1278,6 @@ describe('Plugin', () => {
         })
       })
 
-      describe('watch', () => {
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'watchFile',
-            meta: {
-              'file.path': __filename
-            }
-          })
-          const listener = () => {}
-          const watcher = fs.watchFile(__filename, listener)
-          fs.unwatchFile(__filename, listener)
-          watcher.unref()
-        })
-      })
-
-      describe('unwatchFile', () => {
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'unwatchFile',
-            meta: {
-              'file.path': __filename
-            }
-          })
-          const listener = () => {}
-          const watcher = fs.watchFile(__filename, listener)
-          fs.unwatchFile(__filename, listener)
-          watcher.unref()
-        })
-      })
-
-      describe('watch', () => {
-        it('should be instrumented', (done) => {
-          expectOneSpan(agent, done, {
-            resource: 'watch',
-            meta: {
-              'file.path': __filename
-            }
-          })
-          const listener = () => {}
-          const watcher = fs.watch(__filename, listener)
-          watcher.close()
-        })
-      })
-
       describe('existsSync', () => {
         it('should be instrumented', (done) => {
           expectOneSpan(agent, done, {
@@ -1455,7 +1331,7 @@ describe('Plugin', () => {
               testHandleErrors(fs, 'dir.close', async (_1, _2, _3, cb) => {
                 dir.closeSync()
                 try {
-                // await for Node >=15.4 that returns and rejects a promise instead of throwing
+                  // await for Node >=15.4 that returns and rejects a promise instead of throwing
                   await dir.close()
                 } catch (e) {
                   cb(e)
@@ -1624,7 +1500,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'appendFile', ['some more data'], filehandle, agent))
           })
 
@@ -1640,7 +1516,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'writeFile', ['some more data'], filehandle, agent))
           })
 
@@ -1656,7 +1532,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'readFile', [], filehandle, agent))
           })
 
@@ -1672,7 +1548,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'write', ['some more data'], filehandle, agent))
           })
 
@@ -1689,7 +1565,7 @@ describe('Plugin', () => {
               })
 
               // https://github.com/nodejs/node/issues/31361
-              it('should handle errors', () =>
+              it.skip('should handle errors', () =>
                 testFileHandleErrors(fs, 'writev', [[Buffer.from('some more data')]], filehandle, agent))
             })
           }
@@ -1706,7 +1582,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'read', [Buffer.alloc(5), 0, 5, 0], filehandle, agent))
           })
 
@@ -1728,7 +1604,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'chmod', [mode], filehandle, agent))
           })
 
@@ -1754,7 +1630,7 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
+            it.skip('should handle errors', () =>
               testFileHandleErrors(fs, 'chown', [uid, gid], filehandle, agent))
           })
 
@@ -1770,8 +1646,8 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
-              testFileHandleErrors(fs, 'stat', [], filehandle, agent))
+            it.skip('should handle errors', () =>
+              testHandleErrors(fs, 'stat', [], filehandle, agent))
           })
 
           describe('sync', () => {
@@ -1786,8 +1662,8 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
-              testFileHandleErrors(fs, 'sync', [], filehandle, agent))
+            it.skip('should handle errors', () =>
+              testHandleErrors(fs, 'sync', [], filehandle, agent))
           })
 
           describe('datasync', () => {
@@ -1802,8 +1678,8 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
-              testFileHandleErrors(fs, 'datasync', [], filehandle, agent))
+            it.skip('should handle errors', () =>
+              testHandleErrors(fs, 'datasync', [], filehandle, agent))
           })
 
           describe('truncate', () => {
@@ -1818,8 +1694,8 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
-              testFileHandleErrors(fs, 'truncate', [5], filehandle, agent))
+            it.skip('should handle errors', () =>
+              testHandleErrors(fs, 'truncate', [5], filehandle, agent))
           })
 
           describe('utimes', () => {
@@ -1834,8 +1710,8 @@ describe('Plugin', () => {
             })
 
             // https://github.com/nodejs/node/issues/31361
-            it('should handle errors', () =>
-              testFileHandleErrors(fs, 'utimes', [Date.now(), Date.now()], filehandle, agent))
+            it.skip('should handle errors', () =>
+              testHandleErrors(fs, 'utimes', [Date.now(), Date.now()], filehandle, agent))
           })
 
           describe('close', () => {
@@ -1848,6 +1724,10 @@ describe('Plugin', () => {
               })
               filehandle.close().catch(done)
             })
+
+            // https://github.com/nodejs/node/issues/31361
+            it.skip('should handle errors', () =>
+              testFileHandleErrors(fs, 'close', [], filehandle, agent))
           })
         })
       }
@@ -1915,7 +1795,7 @@ function mkExpected (props) {
   const expected = Object.assign({
     name: 'fs.operation',
     error: 0,
-    service: 'test'
+    service: 'test-fs'
   }, props)
   expected.meta = meta
   return expected
@@ -1935,7 +1815,12 @@ function testHandleErrors (fs, name, tested, args, agent) {
     tested(fs, args, null, err => {
       expectOneSpan(agent, done, {
         resource: name,
-        error: 0
+        error: 0,
+        meta: {
+          'error.type': err.name,
+          'error.msg': err.message,
+          'error.stack': err.stack
+        }
       })
     })
   })

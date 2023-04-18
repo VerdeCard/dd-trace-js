@@ -4,10 +4,12 @@
 
 const axios = require('axios')
 const http = require('http')
-const { once } = require('events')
 const getPort = require('get-port')
 const agent = require('../../dd-trace/test/plugins/agent')
 const web = require('../../dd-trace/src/plugins/util/web')
+const plugin = require('../src')
+
+wrapIt()
 
 const sort = spans => spans.sort((a, b) => a.start.toString() >= b.start.toString() ? 1 : -1)
 
@@ -16,25 +18,21 @@ describe('Plugin', () => {
   let Router
   let appListener
 
-  function defaultErrorHandler (req, res) {
-    return err => {
-      res.writeHead(err ? 500 : 404)
-      res.end()
-    }
-  }
-
-  function server (router, errorHandler = defaultErrorHandler) {
+  function server (router) {
     return http.createServer((req, res) => {
       const config = web.normalizeConfig({})
 
-      web.instrument(tracer, config, req, res, 'web.request')
+      web.instrument(tracer, config, req, res, 'http.request')
 
-      return router(req, res, errorHandler(req, res))
+      return router(req, res, err => {
+        res.writeHead(err ? 500 : 404)
+        res.end()
+      })
     })
   }
 
   describe('router', () => {
-    withVersions('router', 'router', version => {
+    withVersions(plugin, 'router', version => {
       beforeEach(() => {
         tracer = require('../../dd-trace')
       })
@@ -45,11 +43,11 @@ describe('Plugin', () => {
 
       describe('without configuration', () => {
         before(() => {
-          return agent.load(['http', 'router'])
+          return agent.load('router')
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
@@ -103,54 +101,6 @@ describe('Plugin', () => {
                 .catch(done)
             })
           })
-        })
-
-        it('should not error a span when using next("route") with a string', async () => {
-          const router = Router()
-
-          router.use((req, res, next) => {
-            return next('route')
-          })
-          router.get('/foo', (req, res) => {
-            res.end()
-          })
-
-          const port = await getPort()
-          const agentPromise = agent.use(traces => {
-            for (const span of traces[0]) {
-              expect(span.error).to.equal(0)
-            }
-          }, { rejectFirst: true })
-
-          const httpd = server(router).listen(port, 'localhost')
-          await once(httpd, 'listening')
-          const reqPromise = axios.get(`http://localhost:${port}/foo`)
-
-          return Promise.all([agentPromise, reqPromise])
-        })
-
-        it('should not error a span when using next("router") with a string', async () => {
-          const router = Router()
-
-          router.use((req, res, next) => {
-            return next('router')
-          })
-          router.get('/foo', (req, res) => {
-            res.end()
-          })
-
-          const port = await getPort()
-          const agentPromise = agent.use(traces => {
-            for (const span of traces[0]) {
-              expect(span.error).to.equal(0)
-            }
-          }, { rejectFirst: true })
-
-          const httpd = server(router, (req, res) => err => res.end()).listen(port, 'localhost')
-          await once(httpd, 'listening')
-          const reqPromise = axios.get(`http://localhost:${port}/foo`)
-
-          return Promise.all([agentPromise, reqPromise])
         })
       })
     })

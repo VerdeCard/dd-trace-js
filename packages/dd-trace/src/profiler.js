@@ -3,12 +3,9 @@
 const log = require('./log')
 const { profiler } = require('./profiling')
 
-// Stop profiler upon exit in order to collect and export the current profile
-process.once('beforeExit', () => { profiler.stop() })
-
 module.exports = {
   start: config => {
-    const { service, version, env, url, hostname, port, tags } = config
+    const { service, version, env, url, hostname, port } = config
     const { enabled, sourceMap, exporters } = config.profiling
     const logger = {
       debug: (message) => log.debug(message),
@@ -27,8 +24,7 @@ module.exports = {
       exporters,
       url,
       hostname,
-      port,
-      tags
+      port
     })
   },
 

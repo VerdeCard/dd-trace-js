@@ -1,4 +1,6 @@
-const tracer = require('../../..').init()
+const tracer = require('../../..').init({
+  scope: 'noop'
+})
 
 tracer._tracer._processor.process = function process (span) {
   const trace = span.context()._trace

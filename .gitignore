@@ -100,14 +100,12 @@ typings/
 # Ignore all local history of files
 .history
 
-# IntelliJ
-.idea
-
 
 # End of https://www.gitignore.io/api/node,macos,visualstudiocode
 
 .next
 package-lock.json
+yarn.lock
 out
 versions
 build
@@ -118,5 +116,4 @@ dist
 acmeair-nodejs
 !packages/*/test/**/dist
 !packages/*/test/**/node_modules
-packages/datadog-plugin-next/test/package.json
-packages/datadog-plugin-next/test/node_modules
+test-results.xml

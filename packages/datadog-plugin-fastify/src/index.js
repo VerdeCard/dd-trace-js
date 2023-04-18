@@ -1,19 +1,6 @@
 'use strict'
 
-const RouterPlugin = require('../../datadog-plugin-router/src')
-
-class FastifyPlugin extends RouterPlugin {
-  static get id () {
-    return 'fastify'
-  }
-
-  constructor (...args) {
-    super(...args)
-
-    this.addSub('apm:fastify:request:handle', ({ req }) => {
-      this.setFramework(req, 'fastify', this.config)
-    })
-  }
-}
-
-module.exports = FastifyPlugin
+module.exports = [].concat(
+  require('./fastify'),
+  require('./find-my-way') // TODO make this its own plugin, since restify uses it too
+)

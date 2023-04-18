@@ -11,14 +11,7 @@ function findRoot () {
 
 function findPkg () {
   const cwd = findRoot()
-  const directory = path.resolve(cwd)
-  const res = path.parse(directory)
-
-  if (!res) return {}
-
-  const { root } = res
-
-  const filePath = findUp('package.json', root, directory)
+  const filePath = findUp('package.json', cwd)
 
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'))
@@ -27,16 +20,18 @@ function findPkg () {
   }
 }
 
-function findUp (name, root, directory) {
+function findUp (name, cwd) {
+  let directory = path.resolve(cwd)
+  const { root } = path.parse(directory)
+
   while (true) {
     const current = path.resolve(directory, name)
 
     if (fs.existsSync(current)) return current
-
     if (directory === root) return
 
     directory = path.dirname(directory)
   }
 }
 
-module.exports = Object.assign(findPkg(), { findRoot, findUp })
+module.exports = findPkg()

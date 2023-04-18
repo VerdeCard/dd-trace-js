@@ -1,63 +1,27 @@
 'use strict'
 
-const { storage } = require('../../datadog-core')
+const semver = require('semver')
+const scopes = require('../../../ext/scopes')
 
-// TODO: refactor bind to use shimmer once the new internal tracer lands
+const NOOP = scopes.NOOP
 
-const originals = new WeakMap()
+// https://github.com/nodejs/node/pull/33801
+const hasJavaScriptAsyncHooks = semver.satisfies(process.versions.node, '>=14.5 || ^12.19.0')
 
-class Scope {
-  active () {
-    const store = storage.getStore()
+module.exports = name => {
+  let Scope
 
-    return (store && store.span) || null
+  if (name === NOOP) {
+    Scope = require('./scope/base')
+  } else if (name === scopes.SYNC) {
+    Scope = require('./scope/sync')
+  } else if (name === scopes.ASYNC_LOCAL_STORAGE) {
+    Scope = require('./scope/async_local_storage')
+  } else if (name === scopes.ASYNC_RESOURCE || (!name && hasJavaScriptAsyncHooks)) {
+    Scope = require('./scope/async_resource')
+  } else {
+    Scope = require('./scope/async_hooks')
   }
 
-  activate (span, callback) {
-    if (typeof callback !== 'function') return callback
-
-    const oldStore = storage.getStore()
-    const newStore = span ? span._store : oldStore
-
-    storage.enterWith({ ...newStore, span })
-
-    try {
-      return callback()
-    } catch (e) {
-      if (span && typeof span.setTag === 'function') {
-        span.setTag('error', e)
-      }
-
-      throw e
-    } finally {
-      storage.enterWith(oldStore)
-    }
-  }
-
-  bind (fn, span) {
-    if (typeof fn !== 'function') return fn
-
-    const scope = this
-    const spanOrActive = this._spanOrActive(span)
-
-    const bound = function () {
-      return scope.activate(spanOrActive, () => {
-        return fn.apply(this, arguments)
-      })
-    }
-
-    originals.set(bound, fn)
-
-    return bound
-  }
-
-  _spanOrActive (span) {
-    return span !== undefined ? span : this.active()
-  }
-
-  _isPromise (promise) {
-    return promise && typeof promise.then === 'function'
-  }
+  return Scope
 }
-
-module.exports = Scope

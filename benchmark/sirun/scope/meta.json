@@ -1,36 +1,34 @@
 {
   "name": "scope-manager",
   "run": "node index.js",
-  "run_with_affinity": "bash -c \"taskset -c $CPU_AFFINITY node index.js\"",
-  "cachegrind": false,
-  "iterations": 20,
-  "instructions": true,
+  "cachegrind": true,
+  "iterations": 10,
   "variants": {
     "base": {
       "env": {
-        "DD_TRACE_SCOPE": "noop",
-        "COUNT": "1250"
+        "SCOPE_MANAGER": "base",
+        "COUNT": "10000"
       }
     },
     "async_hooks": {
       "baseline": "base",
       "env": {
-        "DD_TRACE_SCOPE": "async_hooks",
-        "COUNT": "1250"
+        "SCOPE_MANAGER": "async_hooks",
+        "COUNT": "10000"
       }
     },
     "async_local_storage": {
       "baseline": "base",
       "env": {
-        "DD_TRACE_SCOPE": "async_local_storage",
-        "COUNT": "1250"
+        "SCOPE_MANAGER": "async_local_storage",
+        "COUNT": "10000"
       }
     },
     "async_resource": {
       "baseline": "base",
       "env": {
-        "DD_TRACE_SCOPE": "async_resource",
-        "COUNT": "1250"
+        "SCOPE_MANAGER": "async_resource",
+        "COUNT": "10000"
       }
     }
   }

@@ -3,15 +3,16 @@
 const { expect } = require('chai')
 const agent = require('../../dd-trace/test/plugins/agent')
 const { expectSomeSpan, withDefaults } = require('../../dd-trace/test/plugins/helpers')
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   describe('kafkajs', function () {
-    this.timeout(10000) // TODO: remove when new internal trace has landed
     afterEach(() => {
-      return agent.close({ ritmReset: false })
+      return agent.close()
     })
-    withVersions('kafkajs', 'kafkajs', (version) => {
+    withVersions(plugin, 'kafkajs', (version) => {
       const testTopic = 'test-topic'
       let kafka
       let tracer
@@ -25,7 +26,7 @@ describe('Plugin', () => {
           } = require(`../../../versions/kafkajs@${version}`).get()
           kafka = new Kafka({
             clientId: `kafkajs-test-${version}`,
-            brokers: ['127.0.0.1:9092']
+            brokers: ['localhost:9092']
           })
         })
         describe('producer', () => {
@@ -67,10 +68,9 @@ describe('Plugin', () => {
               })
 
               expect(span.meta).to.include({
-                [ERROR_TYPE]: error.name,
-                [ERROR_MESSAGE]: error.message,
-                [ERROR_STACK]: error.stack,
-                'component': 'kafkajs'
+                'error.type': error.name,
+                'error.msg': error.message,
+                'error.stack': error.stack
               })
             })
 
@@ -164,10 +164,9 @@ describe('Plugin', () => {
               name: 'kafka.consume',
               service: 'test-kafka',
               meta: {
-                [ERROR_TYPE]: fakeError.name,
-                [ERROR_MESSAGE]: fakeError.message,
-                [ERROR_STACK]: fakeError.stack,
-                'component': 'kafkajs'
+                'error.type': fakeError.name,
+                'error.msg': fakeError.message,
+                'error.stack': fakeError.stack
               },
               resource: testTopic,
               error: 1,

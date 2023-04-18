@@ -1,18 +1,18 @@
 'use strict'
 
-const shimmer = require('../../datadog-shimmer')
+const shimmer = require('shimmer')
 const log = require('./log')
 const metrics = require('./metrics')
 const Loader = require('./loader')
-const { isTrue } = require('./util')
+const { isTrue, isFalse } = require('./util')
 const plugins = require('./plugins')
-const Plugin = require('./plugins/plugin')
-const telemetry = require('./telemetry')
 
-const disabledPlugins = process.env.DD_TRACE_DISABLED_PLUGINS
+shimmer({ logger: () => {} })
+
+const disabldPlugins = process.env.DD_TRACE_DISABLED_PLUGINS
 
 const collectDisabledPlugins = () => {
-  return new Set(disabledPlugins && disabledPlugins.split(',').map(plugin => plugin.trim()))
+  return new Set(disabldPlugins && disabldPlugins.split(',').map(plugin => plugin.trim()))
 }
 
 function cleanEnv (name) {
@@ -27,6 +27,17 @@ function getConfig (name, config = {}) {
   const enabled = cleanEnv(`${name}_ENABLED`)
   if (enabled !== undefined) {
     config.enabled = isTrue(enabled)
+  }
+
+  const analyticsEnabled = cleanEnv(`${name}_ANALYTICS_ENABLED`)
+  const analyticsSampleRate = Math.min(Math.max(cleanEnv(`${name}_ANALYTICS_SAMPLE_RATE`), 0), 1)
+
+  if (isFalse(analyticsEnabled)) {
+    config.analytics = false
+  } else if (!Number.isNaN(analyticsSampleRate)) {
+    config.analytics = analyticsSampleRate
+  } else if (isTrue(analyticsEnabled)) {
+    config.analytics = true
   }
 
   return config
@@ -44,9 +55,6 @@ class Instrumenter {
   }
 
   use (name, config) {
-    if (typeof name !== 'string') return
-    const plugin = plugins[name.toLowerCase()]
-    if (plugin && plugin.prototype instanceof Plugin) return
     if (typeof config === 'boolean') {
       config = { enabled: config }
     }
@@ -54,8 +62,7 @@ class Instrumenter {
     config = getConfig(name, config)
 
     try {
-      this._set(plugin, { name, config })
-      telemetry.updateIntegrations()
+      this._set(plugins[name.toLowerCase()], { name, config })
     } catch (e) {
       log.debug(`Could not find a plugin named "${name}".`)
     }
@@ -75,7 +82,6 @@ class Instrumenter {
       Object.keys(plugins)
         .filter(name => !this._plugins.has(plugins[name]))
         .forEach(name => {
-          if (plugins[name].prototype instanceof Plugin) return
           const pluginConfig = {}
           if (serviceMapping && serviceMapping[name]) {
             pluginConfig.service = serviceMapping[name]
@@ -98,19 +104,74 @@ class Instrumenter {
   }
 
   wrap (nodules, names, wrapper) {
-    shimmer.massWrap(nodules, names, wrapper)
+    nodules = [].concat(nodules)
+    names = [].concat(names)
+
+    nodules.forEach(nodule => {
+      names.forEach(name => {
+        if (typeof nodule[name] !== 'function') {
+          throw new Error(`Expected object ${nodule} to contain method ${name}.`)
+        }
+
+        Object.defineProperty(nodule[name], '_datadog_patched', {
+          value: true,
+          configurable: true
+        })
+      })
+    })
+
+    shimmer.massWrap.call(this, nodules, names, function (original, name) {
+      const wrapped = wrapper(original, name)
+      const props = Object.getOwnPropertyDescriptors(original)
+      const keys = Reflect.ownKeys(props)
+
+      // https://github.com/othiym23/shimmer/issues/19
+      for (const key of keys) {
+        if (typeof key !== 'symbol' || wrapped.hasOwnProperty(key)) continue
+
+        Object.defineProperty(wrapped, key, props[key])
+      }
+
+      return wrapped
+    })
   }
 
   unwrap (nodules, names, wrapper) {
-    shimmer.massUnwrap(nodules, names, wrapper)
+    nodules = [].concat(nodules)
+    names = [].concat(names)
+
+    shimmer.massUnwrap.call(this, nodules, names, wrapper)
+
+    nodules.forEach(nodule => {
+      names.forEach(name => {
+        nodule[name] && delete nodule[name]._datadog_patched
+      })
+    })
   }
 
   wrapExport (moduleExports, wrapper) {
-    return shimmer.wrap(moduleExports, wrapper)
+    if (typeof moduleExports !== 'function') return moduleExports
+
+    const props = Object.keys(moduleExports)
+    const shim = function () {
+      return moduleExports._datadog_wrapper.apply(this, arguments)
+    }
+
+    for (const prop of props) {
+      shim[prop] = moduleExports[prop]
+    }
+
+    moduleExports._datadog_wrapper = wrapper
+
+    return shim
   }
 
   unwrapExport (moduleExports) {
-    return shimmer.unwrap(moduleExports)
+    if (moduleExports && moduleExports._datadog_wrapper) {
+      moduleExports._datadog_wrapper = moduleExports
+    }
+
+    return moduleExports
   }
 
   load (plugin, meta) {
@@ -156,17 +217,11 @@ class Instrumenter {
 
     if (!instrumented) {
       this._instrumented.set(instrumentation, instrumented = new Set())
-      telemetry.updateIntegrations()
     }
 
-    if (!instrumented.has(this._defaultExport(moduleExports))) {
-      try {
-        moduleExports = instrumentation.patch.call(this, moduleExports, this._tracer._tracer, config) || moduleExports
-        return moduleExports
-      } finally {
-        // add even on error since `unpatch` will take care of removing it.
-        instrumented.add(this._defaultExport(moduleExports))
-      }
+    if (!instrumented.has(moduleExports)) {
+      instrumented.add(moduleExports)
+      return instrumentation.patch.call(this, moduleExports, this._tracer._tracer, config)
     }
   }
 
@@ -191,12 +246,6 @@ class Instrumenter {
       this._plugins.set(plugin, meta)
       this.load(plugin, meta)
     }
-  }
-
-  // ESM modules have a different export between `import` and `require` so we
-  // use the default export instead when available.
-  _defaultExport (moduleExports) {
-    return moduleExports && (moduleExports.default || moduleExports)
   }
 }
 

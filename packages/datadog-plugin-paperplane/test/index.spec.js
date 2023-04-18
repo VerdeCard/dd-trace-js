@@ -2,9 +2,13 @@
 
 const axios = require('axios')
 const getPort = require('get-port')
+const http = require('http')
 const semver = require('semver')
 
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
+
+wrapIt()
 
 const composeP = (...fs) => x =>
   fs.reduceRight(then, x)
@@ -22,7 +26,6 @@ const then = (x, f) =>
 
 describe('Plugin', () => {
   let paperplane
-  let http
   let server
   let span
   let tracer
@@ -42,26 +45,25 @@ describe('Plugin', () => {
   })
 
   describe('paperplane', () => {
-    withVersions('paperplane', 'paperplane', version => {
+    withVersions(plugin, 'paperplane', version => {
       beforeEach(() => {
         tracer = require('../../dd-trace')
       })
 
       afterEach(() => {
-        server && server.close()
+        server.close()
       })
 
       describe('without configuration', () => {
         before(() => {
-          return agent.load(['paperplane', 'http'], [{}, { client: false }])
+          return agent.load('paperplane')
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
-          http = require('http')
           paperplane = require(`../../../versions/paperplane@${version}`).get()
         })
 
@@ -89,7 +91,6 @@ describe('Plugin', () => {
                 expect(spans[0].meta).to.have.property('http.url', `http://localhost:${port}/user`)
                 expect(spans[0].meta).to.have.property('http.method', 'GET')
                 expect(spans[0].meta).to.have.property('http.status_code', '200')
-                expect(spans[0].meta).to.have.property('component', 'paperplane')
               })
               .then(done)
               .catch(done)
@@ -132,6 +133,8 @@ describe('Plugin', () => {
         })
 
         it('should not lose the current path when changing scope', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const { methods, mount, routes, send } = paperplane
 
           const endpoints = routes({
@@ -174,6 +177,8 @@ describe('Plugin', () => {
         })
 
         it('should not lose the current path without a scope', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const { methods, mount, routes, send } = paperplane
 
           const endpoints = routes({
@@ -350,7 +355,6 @@ describe('Plugin', () => {
               expect(spans[0]).to.have.property('error', 1)
               expect(spans[0]).to.have.property('resource', 'GET /user')
               expect(spans[0].meta).to.have.property('http.status_code', '500')
-              expect(spans[0].meta).to.have.property('component', 'paperplane')
 
               done()
             })
@@ -383,7 +387,6 @@ describe('Plugin', () => {
               expect(spans[0]).to.have.property('error', 0)
               expect(spans[0]).to.have.property('resource', 'GET /user')
               expect(spans[0].meta).to.have.property('http.status_code', '400')
-              expect(spans[0].meta).to.have.property('component', 'paperplane')
 
               done()
             })
@@ -412,7 +415,6 @@ describe('Plugin', () => {
 
                 expect(spans[0]).to.have.property('error', 1)
                 expect(spans[0].meta).to.have.property('http.status_code', '500')
-                expect(spans[0].meta).to.have.property('component', 'paperplane')
               })
               .then(done)
               .catch(done)
@@ -450,19 +452,19 @@ describe('Plugin', () => {
 
       describe('with configuration', () => {
         before(() => {
-          return agent.load(['paperplane', 'http'], [{
+          return agent.load('paperplane', {
             service: 'custom',
             validateStatus: code => code < 400,
-            headers: ['User-Agent'],
-            logInjection: true
-          }, { client: false }])
+            headers: ['User-Agent']
+          })
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(() => {
+          tracer._tracer._logInjection = true
           paperplane = require(`../../../versions/paperplane@${version}`).get()
         })
 
@@ -569,7 +571,7 @@ describe('Plugin', () => {
 
               const record = JSON.parse(console.info.firstCall.args[0])
 
-              expect(record.dd).to.deep.include({
+              expect(record).to.have.deep.property('dd', {
                 trace_id: span.context().toTraceId(),
                 span_id: span.context().toSpanId()
               })
@@ -592,7 +594,7 @@ describe('Plugin', () => {
 
               const record = JSON.parse(console.info.firstCall.args[0])
 
-              expect(record.dd).to.deep.include({
+              expect(record).to.have.deep.property('dd', {
                 trace_id: span.context().toTraceId(),
                 span_id: span.context().toSpanId()
               })
@@ -605,7 +607,7 @@ describe('Plugin', () => {
             })
           })
 
-          it('should not inject trace_id or span_id without an active span', () => {
+          it('should not alter logs with no active span', () => {
             /* eslint-disable no-console */
             paperplane.logger({ message: ':datadoge:' })
 
@@ -613,9 +615,7 @@ describe('Plugin', () => {
 
             const record = JSON.parse(console.info.firstCall.args[0])
 
-            expect(record).to.have.property('dd')
-            expect(record.dd).to.not.have.property('trace_id')
-            expect(record.dd).to.not.have.property('span_id')
+            expect(record).to.not.have.property('dd')
             expect(record).to.have.property('message', ':datadoge:')
             /* eslint-enable no-console */
           })

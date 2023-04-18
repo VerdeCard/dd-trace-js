@@ -1,7 +1,9 @@
 'use strict'
 
-const semver = require('semver')
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   let id
@@ -9,7 +11,7 @@ describe('Plugin', () => {
   let collection
 
   describe('mongoose', () => {
-    withVersions('mongoose', ['mongoose'], (version) => {
+    withVersions(plugin, ['mongoose'], (version) => {
       let mongoose
 
       // This needs to be called synchronously right before each test to make
@@ -22,34 +24,34 @@ describe('Plugin', () => {
         })
       }
 
-      before(() => {
-        return agent.load(['mongodb-core'])
+      beforeEach(() => {
+        return agent.load(['mongoose', 'mongodb-core'])
       })
 
-      before(() => {
+      beforeEach(() => {
         id = require('../../dd-trace/src/id')
         tracer = require('../../dd-trace')
 
         collection = id().toString()
 
         mongoose = require(`../../../versions/mongoose@${version}`).get()
-
-        connect()
       })
 
-      after(() => {
+      afterEach(() => {
         return mongoose.disconnect()
       })
 
-      after(() => {
-        return agent.close({ ritmReset: false })
+      afterEach(() => {
+        return agent.close()
       })
 
       it('should propagate context with write operations', () => {
-        const Cat = mongoose.model('Cat1', { name: String })
+        const Cat = mongoose.model('Cat', { name: String })
 
         const span = {}
         const kitty = new Cat({ name: 'Zildjian' })
+
+        connect()
 
         return tracer.scope().activate(span, () => {
           return kitty.save().then(() => {
@@ -58,81 +60,59 @@ describe('Plugin', () => {
         })
       })
 
-      if (!semver.intersects(version, '>=7')) {
-        it('should propagate context with queries', done => {
-          const Cat = mongoose.model('Cat2', { name: String })
+      it('should propagate context with queries', done => {
+        const Cat = mongoose.model('Cat', { name: String })
 
-          const span = {}
+        const span = {}
 
-          tracer.scope().activate(span, () => {
-            Cat.find({ name: 'Zildjian' }).exec(() => {
-              try {
-                expect(tracer.scope().active()).to.equal(span)
-                done()
-              } catch (e) {
-                done(e)
-              }
-            })
-          })
-        })
+        connect()
 
-        it('should propagate context with aggregations', done => {
-          const Cat = mongoose.model('Cat3', { name: String })
-
-          const span = {}
-
-          tracer.scope().activate(span, () => {
-            Cat.aggregate([{ $match: { name: 'Zildjian' } }]).exec(() => {
-              try {
-                expect(tracer.scope().active()).to.equal(span)
-                done()
-              } catch (e) {
-                done(e)
-              }
-            })
-          })
-        })
-
-        it('should propagate context with promises', () => {
-          if (!mongoose.Promise.ES6) return // native promises
-
-          const promise = new mongoose.Promise.ES6((resolve) => {
-            setImmediate(resolve)
-          })
-
-          const span = {}
-
-          return tracer.scope().activate(span, () => {
-            return promise.then(() => {
+        tracer.scope().activate(span, () => {
+          Cat.find({ name: 'Zildjian' }).exec(() => {
+            try {
               expect(tracer.scope().active()).to.equal(span)
-            })
+              done()
+            } catch (e) {
+              done(e)
+            }
           })
         })
-      } else {
-        it('should propagate context with queries', () => {
-          const Cat = mongoose.model('Cat2', { name: String })
+      })
 
-          const span = {}
+      it('should propagate context with aggregations', done => {
+        const Cat = mongoose.model('Cat', { name: String })
 
-          return tracer.scope().activate(span, () => {
-            return Cat.find({ name: 'Zildjian' }).exec().then(() => {
+        const span = {}
+
+        connect()
+
+        tracer.scope().activate(span, () => {
+          Cat.aggregate([{ $match: { name: 'Zildjian' } }]).exec(() => {
+            try {
               expect(tracer.scope().active()).to.equal(span)
-            })
+              done()
+            } catch (e) {
+              done(e)
+            }
           })
         })
+      })
 
-        it('should propagate context with aggregations', () => {
-          const Cat = mongoose.model('Cat3', { name: String })
+      it('should propagate context with promises', () => {
+        if (!mongoose.Promise.ES6) return // native promises
 
-          const span = {}
+        const promise = new mongoose.Promise.ES6((resolve) => {
+          setImmediate(resolve)
+        })
 
-          return tracer.scope().activate(span, () => {
-            return Cat.aggregate([{ $match: { name: 'Zildjian' } }]).exec().then(() => {
-              expect(tracer.scope().active()).to.equal(span)
-            })
+        const span = {}
+
+        return tracer.scope().activate(span, () => {
+          return promise.then(() => {
+            expect(tracer.scope().active()).to.equal(span)
           })
         })
-      }
+      })
     })
   })
 })

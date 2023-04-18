@@ -1,7 +1,6 @@
 'use strict'
 
 const dgram = require('dgram')
-const port = process.env.SIRUN_STATSD_PORT || 8125
 
 class StatsD {
   constructor (options) {
@@ -23,7 +22,7 @@ class StatsD {
 
     this._buffer = ''
 
-    this._udp.send(buffer, 0, buffer.length, port)
+    this._udp.send(buffer, 0, buffer.length, 8125)
   }
 
   _add (stat, value, type) {

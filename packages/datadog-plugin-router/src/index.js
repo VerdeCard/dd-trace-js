@@ -1,151 +1,172 @@
 'use strict'
 
+const METHODS = require('methods').concat('all')
+const pathToRegExp = require('path-to-regexp')
 const web = require('../../dd-trace/src/plugins/util/web')
-const WebPlugin = require('../../datadog-plugin-web/src')
-const analyticsSampler = require('../../dd-trace/src/analytics_sampler')
-const { storage } = require('../../datadog-core')
-const { COMPONENT } = require('../../dd-trace/src/constants')
 
-class RouterPlugin extends WebPlugin {
-  static get id () {
-    return 'router'
-  }
+const regexpCache = Object.create(null)
 
-  constructor (...args) {
-    super(...args)
-
-    this._storeStack = []
-    this._contexts = new WeakMap()
-
-    this.addSub(`apm:${this.constructor.id}:middleware:enter`, ({ req, name, route }) => {
-      const childOf = this._getActive(req) || this._getStoreSpan()
-
-      if (!childOf) return
-
-      const span = this._getMiddlewareSpan(name, childOf)
-      const context = this._createContext(req, route, childOf)
-
-      if (childOf !== span) {
-        context.middleware.push(span)
-      }
-
-      const store = storage.getStore()
-      this._storeStack.push(store)
-      this.enter(span, store)
-
+function createWrapHandle (tracer, config) {
+  return function wrapHandle (handle) {
+    return function handleWithTracer (req, res, done) {
       web.patch(req)
-      web.setRoute(req, context.route)
-    })
 
-    this.addSub(`apm:${this.constructor.id}:middleware:next`, ({ req }) => {
-      const context = this._contexts.get(req)
-
-      if (!context) return
-
-      context.stack.pop()
-    })
-
-    this.addSub(`apm:${this.constructor.id}:middleware:finish`, ({ req }) => {
-      const context = this._contexts.get(req)
-
-      if (!context || context.middleware.length === 0) return
-
-      context.middleware.pop().finish()
-    })
-
-    this.addSub(`apm:${this.constructor.id}:middleware:exit`, ({ req }) => {
-      const savedStore = this._storeStack.pop()
-      const span = savedStore && savedStore.span
-      this.enter(span, savedStore)
-    })
-
-    this.addSub(`apm:${this.constructor.id}:middleware:error`, ({ req, error }) => {
-      web.addError(req, error)
-
-      if (!this.config.middleware) return
-
-      const span = this._getActive(req)
-
-      if (!span) return
-
-      span.setTag('error', error)
-    })
-
-    this.addSub(`apm:http:server:request:finish`, ({ req }) => {
-      const context = this._contexts.get(req)
-
-      if (!context) return
-
-      let span
-
-      while ((span = context.middleware.pop())) {
-        span.finish()
-      }
-    })
-  }
-
-  _getActive (req) {
-    const context = this._contexts.get(req)
-
-    if (!context) return
-    if (context.middleware.length === 0) return context.span
-
-    return context.middleware[context.middleware.length - 1]
-  }
-
-  _getStoreSpan () {
-    const store = storage.getStore()
-
-    return store && store.span
-  }
-
-  _getMiddlewareSpan (name, childOf) {
-    if (this.config.middleware === false) {
-      return childOf
+      return handle.apply(this, arguments)
     }
-
-    const span = this.tracer.startSpan(`${this.constructor.id}.middleware`, {
-      childOf,
-      tags: {
-        [COMPONENT]: this.constructor.id,
-        'resource.name': name || '<anonymous>'
-      }
-    })
-
-    analyticsSampler.sample(span, this.config.measured)
-
-    return span
-  }
-
-  _createContext (req, route, span) {
-    let context = this._contexts.get(req)
-
-    if (!route || route === '/' || route === '*') {
-      route = ''
-    }
-
-    if (context) {
-      context.stack.push(route)
-
-      route = context.stack.join('')
-
-      // Longer route is more likely to be the actual route handler route.
-      if (route.length > context.route.length) {
-        context.route = route
-      }
-    } else {
-      context = {
-        span,
-        stack: [route],
-        route,
-        middleware: []
-      }
-
-      this._contexts.set(req, context)
-    }
-
-    return context
   }
 }
 
-module.exports = RouterPlugin
+function wrapRouterMethod (original) {
+  return function methodWithTrace (fn) {
+    const offset = this.stack ? [].concat(this.stack).length : 0
+    const router = original.apply(this, arguments)
+
+    if (typeof this.stack === 'function') {
+      this.stack = [{ handle: this.stack }]
+    }
+
+    wrapStack(this.stack, offset, extractMatchers(fn))
+
+    return router
+  }
+}
+
+function wrapLayerHandle (layer, handle) {
+  handle._name = handle._name || layer.name
+
+  let wrapCallHandle
+
+  if (handle.length === 4) {
+    wrapCallHandle = function (error, req, res, next) {
+      return callHandle(layer, handle, req, [error, req, res, wrapNext(layer, req, next)])
+    }
+  } else {
+    wrapCallHandle = function (req, res, next) {
+      return callHandle(layer, handle, req, [req, res, wrapNext(layer, req, next)])
+    }
+  }
+
+  // This is a workaround for the `loopback` library so that it can find the correct express layer
+  // that contains the real handle function
+  wrapCallHandle._datadog_orig = handle
+
+  // TODO(bengl) assigning prototypes like this when wrapping should be done in a centralized place.
+  Object.setPrototypeOf(wrapCallHandle, handle)
+
+  return wrapCallHandle
+}
+
+function wrapStack (stack, offset, matchers) {
+  [].concat(stack).slice(offset).forEach(layer => {
+    if (layer.__handle) { // express-async-errors
+      layer.__handle = wrapLayerHandle(layer, layer.__handle)
+    } else {
+      layer.handle = wrapLayerHandle(layer, layer.handle)
+    }
+
+    layer._datadog_matchers = matchers
+
+    if (layer.route) {
+      METHODS.forEach(method => {
+        if (typeof layer.route.stack === 'function') {
+          layer.route.stack = [{ handle: layer.route.stack }]
+        }
+
+        layer.route[method] = wrapRouterMethod(layer.route[method])
+      })
+    }
+  })
+}
+
+function wrapNext (layer, req, next) {
+  if (!next || !web.active(req)) return next
+
+  const originalNext = next
+
+  return function (error) {
+    if (!error && layer.path && !isFastStar(layer) && !isFastSlash(layer)) {
+      web.exitRoute(req)
+    }
+
+    web.finish(req, error)
+
+    originalNext.apply(null, arguments)
+  }
+}
+
+function callHandle (layer, handle, req, args) {
+  const matchers = layer._datadog_matchers
+
+  if (web.active(req) && matchers) {
+    // Try to guess which path actually matched
+    for (let i = 0; i < matchers.length; i++) {
+      if (matchers[i].test(layer)) {
+        web.enterRoute(req, matchers[i].path)
+
+        break
+      }
+    }
+  }
+
+  return web.wrapMiddleware(req, handle, 'express.middleware', () => {
+    return handle.apply(layer, args)
+  })
+}
+
+function extractMatchers (fn) {
+  const arg = flatten([].concat(fn))
+
+  if (typeof arg[0] === 'function') {
+    return []
+  }
+
+  return arg.map(pattern => ({
+    path: pattern instanceof RegExp ? `(${pattern})` : pattern,
+    test: layer => !isFastStar(layer) && !isFastSlash(layer) && cachedPathToRegExp(pattern).test(layer.path)
+  }))
+}
+
+function isFastStar (layer) {
+  if (layer.regexp.fast_star !== undefined) {
+    return layer.regexp.fast_star
+  }
+
+  return layer._datadog_matchers.some(matcher => matcher.path === '*')
+}
+
+function isFastSlash (layer) {
+  if (layer.regexp.fast_slash !== undefined) {
+    return layer.regexp.fast_slash
+  }
+
+  return layer._datadog_matchers.some(matcher => matcher.path === '/')
+}
+
+function flatten (arr) {
+  return arr.reduce((acc, val) => Array.isArray(val) ? acc.concat(flatten(val)) : acc.concat(val), [])
+}
+
+function cachedPathToRegExp (pattern) {
+  const maybeCached = regexpCache[pattern]
+  if (maybeCached) {
+    return maybeCached
+  }
+  const regexp = pathToRegExp(pattern)
+  regexpCache[pattern] = regexp
+  return regexp
+}
+
+module.exports = {
+  name: 'router',
+  versions: ['>=1'],
+  patch (Router, tracer, config) {
+    this.wrap(Router.prototype, 'handle', createWrapHandle(tracer, config))
+    this.wrap(Router.prototype, 'use', wrapRouterMethod)
+    this.wrap(Router.prototype, 'route', wrapRouterMethod)
+  },
+  unpatch (Router) {
+    this.unwrap(Router.prototype, 'handle')
+    this.unwrap(Router.prototype, 'use')
+    this.unwrap(Router.prototype, 'route')
+  }
+}

@@ -1,173 +1,259 @@
-'use strict'
+const { promisify } = require('util')
 
-const CiPlugin = require('../../dd-trace/src/plugins/ci_plugin')
-const { storage } = require('../../datadog-core')
-
+const id = require('../../dd-trace/src/id')
+const { SAMPLING_RULE_DECISION } = require('../../dd-trace/src/constants')
+const { SAMPLING_PRIORITY, SPAN_TYPE, RESOURCE_NAME } = require('../../../ext/tags')
+const { AUTO_KEEP } = require('../../../ext/priority')
 const {
+  TEST_TYPE,
+  TEST_NAME,
+  TEST_SUITE,
   TEST_STATUS,
   TEST_PARAMETERS,
-  finishAllTraceSpans,
-  getTestSuitePath,
+  CI_APP_ORIGIN,
+  getTestEnvironmentMetadata,
   getTestParametersString,
-  getTestSuiteCommonTags,
-  addIntelligentTestRunnerSpanTags
+  finishAllTraceSpans
 } = require('../../dd-trace/src/plugins/util/test')
-const { COMPONENT } = require('../../dd-trace/src/constants')
 
-class MochaPlugin extends CiPlugin {
-  static get id () {
-    return 'mocha'
-  }
+function getTestSpanMetadata (tracer, test, sourceRoot) {
+  const childOf = tracer.extract('text_map', {
+    'x-datadog-trace-id': id().toString(10),
+    'x-datadog-parent-id': '0000000000000000',
+    'x-datadog-sampled': 1
+  })
+  const { file: testSuite } = test
+  const fullTestName = test.fullTitle()
+  const strippedTestSuite = testSuite ? testSuite.replace(`${sourceRoot}/`, '') : ''
 
-  constructor (...args) {
-    super(...args)
-
-    this._testSuites = new Map()
-    this._testNameToParams = {}
-    this.sourceRoot = process.cwd()
-
-    this.addSub('ci:mocha:test-suite:code-coverage', ({ coverageFiles, suiteFile }) => {
-      if (!this.itrConfig || !this.itrConfig.isCodeCoverageEnabled) {
-        return
-      }
-      const testSuiteSpan = this._testSuites.get(suiteFile)
-
-      const relativeCoverageFiles = [...coverageFiles, suiteFile]
-        .map(filename => getTestSuitePath(filename, this.sourceRoot))
-
-      const formattedCoverage = {
-        traceId: testSuiteSpan.context()._traceId,
-        spanId: testSuiteSpan.context()._spanId,
-        files: relativeCoverageFiles
-      }
-
-      this.tracer._exporter.exportCoverage(formattedCoverage)
-    })
-
-    this.addSub('ci:mocha:test-suite:start', (suite) => {
-      const store = storage.getStore()
-      const testSuiteMetadata = getTestSuiteCommonTags(
-        this.command,
-        this.frameworkVersion,
-        getTestSuitePath(suite.file, this.sourceRoot),
-        'mocha'
-      )
-      const testSuiteSpan = this.tracer.startSpan('mocha.test_suite', {
-        childOf: this.testModuleSpan,
-        tags: {
-          [COMPONENT]: this.constructor.id,
-          ...this.testEnvironmentMetadata,
-          ...testSuiteMetadata
-        }
-      })
-      this.enter(testSuiteSpan, store)
-      this._testSuites.set(suite.file, testSuiteSpan)
-    })
-
-    this.addSub('ci:mocha:test-suite:finish', (status) => {
-      const store = storage.getStore()
-      if (store && store.span) {
-        const span = storage.getStore().span
-        // the test status of the suite may have been set in ci:mocha:test-suite:error already
-        if (!span.context()._tags[TEST_STATUS]) {
-          span.setTag(TEST_STATUS, status)
-        }
-        span.finish()
-      }
-    })
-
-    this.addSub('ci:mocha:test-suite:error', (err) => {
-      const store = storage.getStore()
-      if (store && store.span) {
-        const span = storage.getStore().span
-        span.setTag('error', err)
-        span.setTag(TEST_STATUS, 'fail')
-      }
-    })
-
-    this.addSub('ci:mocha:test:start', (test) => {
-      const store = storage.getStore()
-      const span = this.startTestSpan(test)
-
-      this.enter(span, store)
-    })
-
-    this.addSub('ci:mocha:test:finish', (status) => {
-      const store = storage.getStore()
-
-      if (store && store.span) {
-        const span = storage.getStore().span
-
-        span.setTag(TEST_STATUS, status)
-
-        span.finish()
-        finishAllTraceSpans(span)
-      }
-    })
-
-    this.addSub('ci:mocha:test:skip', (test) => {
-      const store = storage.getStore()
-      // skipped through it.skip, so the span is not created yet
-      // for this test
-      if (!store) {
-        const testSpan = this.startTestSpan(test)
-        this.enter(testSpan, store)
-      }
-    })
-
-    this.addSub('ci:mocha:test:error', (err) => {
-      const store = storage.getStore()
-      if (err && store && store.span) {
-        const span = store.span
-        if (err.constructor.name === 'Pending' && !this.forbidPending) {
-          span.setTag(TEST_STATUS, 'skip')
-        } else {
-          span.setTag(TEST_STATUS, 'fail')
-          span.setTag('error', err)
-        }
-      }
-    })
-
-    this.addSub('ci:mocha:test:parameterize', ({ name, params }) => {
-      this._testNameToParams[name] = params
-    })
-
-    this.addSub('ci:mocha:session:finish', ({ status, isSuitesSkipped, testCodeCoverageLinesTotal }) => {
-      if (this.testSessionSpan) {
-        const { isSuitesSkippingEnabled, isCodeCoverageEnabled } = this.itrConfig || {}
-        this.testSessionSpan.setTag(TEST_STATUS, status)
-        this.testModuleSpan.setTag(TEST_STATUS, status)
-
-        addIntelligentTestRunnerSpanTags(
-          this.testSessionSpan,
-          this.testModuleSpan,
-          { isSuitesSkipped, isSuitesSkippingEnabled, isCodeCoverageEnabled, testCodeCoverageLinesTotal }
-        )
-
-        this.testModuleSpan.finish()
-        this.testSessionSpan.finish()
-        finishAllTraceSpans(this.testSessionSpan)
-      }
-      this.itrConfig = null
-      this.tracer._exporter.flush()
-    })
-  }
-
-  startTestSpan (test) {
-    const testName = test.fullTitle()
-    const { file: testSuiteAbsolutePath, title } = test
-
-    const extraTags = {}
-    const testParametersString = getTestParametersString(this._testNameToParams, title)
-    if (testParametersString) {
-      extraTags[TEST_PARAMETERS] = testParametersString
-    }
-
-    const testSuite = getTestSuitePath(testSuiteAbsolutePath, this.sourceRoot)
-    const testSuiteSpan = this._testSuites.get(testSuiteAbsolutePath)
-
-    return super.startTestSpan(testName, testSuite, testSuiteSpan, extraTags)
+  return {
+    childOf,
+    resource: `${strippedTestSuite}.${fullTestName}`,
+    [TEST_TYPE]: 'test',
+    [TEST_NAME]: fullTestName,
+    [TEST_SUITE]: strippedTestSuite,
+    [SAMPLING_RULE_DECISION]: 1,
+    [SAMPLING_PRIORITY]: AUTO_KEEP
   }
 }
 
-module.exports = MochaPlugin
+function createWrapRunTest (tracer, testEnvironmentMetadata, sourceRoot) {
+  return function wrapRunTest (runTest) {
+    return async function runTestWithTrace () {
+      let specFunction = this.test.fn
+      if (specFunction.length) {
+        specFunction = promisify(specFunction)
+        // otherwise you have to explicitly call done()
+        this.test.async = 0
+        this.test.sync = true
+      }
+
+      const { childOf, resource, ...testSpanMetadata } = getTestSpanMetadata(tracer, this.test, sourceRoot)
+
+      const testParametersString = getTestParametersString(nameToParams, this.test.title)
+      if (testParametersString) {
+        testSpanMetadata[TEST_PARAMETERS] = testParametersString
+      }
+
+      this.test.fn = tracer.wrap(
+        'mocha.test',
+        {
+          type: 'test',
+          childOf,
+          resource,
+          tags: {
+            ...testSpanMetadata,
+            ...testEnvironmentMetadata
+          }
+        },
+        async () => {
+          const activeSpan = tracer.scope().active()
+          activeSpan.context()._trace.origin = CI_APP_ORIGIN
+          let result
+          try {
+            const context = this.test.ctx
+            result = await specFunction.call(context)
+            if (context.test.state !== 'failed' && !context.test.timedOut) {
+              activeSpan.setTag(TEST_STATUS, 'pass')
+            } else {
+              activeSpan.setTag(TEST_STATUS, 'fail')
+            }
+          } catch (error) {
+            // this.skip has been called
+            if (error.constructor.name === 'Pending' && !this.forbidPending) {
+              activeSpan.setTag(TEST_STATUS, 'skip')
+            } else {
+              activeSpan.setTag(TEST_STATUS, 'fail')
+              activeSpan.setTag('error', error)
+            }
+            throw error
+          } finally {
+            finishAllTraceSpans(activeSpan)
+          }
+          return result
+        }
+      )
+      return runTest.apply(this, arguments)
+    }
+  }
+}
+
+function getAllTestsInSuite (root) {
+  const tests = []
+  function getTests (suiteOrTest) {
+    suiteOrTest.tests.forEach(test => {
+      tests.push(test)
+    })
+    suiteOrTest.suites.forEach(suite => {
+      getTests(suite)
+    })
+  }
+  getTests(root)
+  return tests
+}
+
+// Necessary to get the skipped tests, that do not go through runTest
+function createWrapRunTests (tracer, testEnvironmentMetadata, sourceRoot) {
+  return function wrapRunTests (runTests) {
+    return function runTestsWithTrace () {
+      runTests.apply(this, arguments)
+      const suite = arguments[0]
+      const tests = getAllTestsInSuite(suite)
+      tests.forEach(test => {
+        const { pending: isSkipped } = test
+        // We call `getAllTestsInSuite` with the root suite so every skipped test
+        // should already have an associated test span.
+        // This function is called with every suite, so we need a way to mark
+        // the test as already accounted for. We do this through `__datadog_skipped`.
+        // If the test is already marked as skipped, we don't create an additional test span.
+        if (!isSkipped || test.__datadog_skipped) {
+          return
+        }
+        test.__datadog_skipped = true
+        const { childOf, resource, ...testSpanMetadata } = getTestSpanMetadata(tracer, test, sourceRoot)
+
+        const testSpan = tracer
+          .startSpan('mocha.test', {
+            childOf,
+            tags: {
+              [SPAN_TYPE]: 'test',
+              [RESOURCE_NAME]: resource,
+              ...testSpanMetadata,
+              ...testEnvironmentMetadata,
+              [TEST_STATUS]: 'skip'
+            }
+          })
+        testSpan.context()._trace.origin = CI_APP_ORIGIN
+
+        testSpan.finish()
+      })
+    }
+  }
+}
+
+const nameToParams = {}
+
+function wrapMochaEach (mochaEach) {
+  return function mochaEachWithTrace () {
+    const [params] = arguments
+    const { it, ...rest } = mochaEach.apply(this, arguments)
+    return {
+      it: function (name) {
+        nameToParams[name] = params
+        it.apply(this, arguments)
+      },
+      ...rest
+    }
+  }
+}
+
+function createWrapFail (tracer, testEnvironmentMetadata, sourceRoot) {
+  return function wrapFail (fail) {
+    return function failWithTrace (hook, err) {
+      if (hook.type !== 'hook') {
+        /**
+         * This clause is to cover errors that are uncaught, such as:
+         * it('will fail', done => {
+         *   setTimeout(() => {
+         *     // will throw but will not be caught by `runTestWithTrace`
+         *     expect(true).to.equal(false)
+         *     done()
+         *   }, 100)
+         * })
+         */
+        const testSpan = tracer.scope().active()
+        if (!testSpan) {
+          return fail.apply(this, arguments)
+        }
+        const {
+          [TEST_NAME]: testName,
+          [TEST_SUITE]: testSuite,
+          [TEST_STATUS]: testStatus
+        } = testSpan._spanContext._tags
+
+        const isActiveSpanFailing = hook.fullTitle() === testName && hook.file.endsWith(testSuite)
+
+        if (isActiveSpanFailing && !testStatus) {
+          testSpan.setTag(TEST_STATUS, 'fail')
+          testSpan.setTag('error', err)
+          // need to manually finish, as it will not be caught in `runTestWithTrace`
+          testSpan.finish()
+        }
+        return fail.apply(this, arguments)
+      }
+      if (err && hook.ctx && hook.ctx.currentTest) {
+        err.message = `${hook.title}: ${err.message}`
+        const {
+          childOf,
+          resource,
+          ...testSpanMetadata
+        } = getTestSpanMetadata(tracer, hook.ctx.currentTest, sourceRoot)
+        const testSpan = tracer
+          .startSpan('mocha.test', {
+            childOf,
+            tags: {
+              [SPAN_TYPE]: 'test',
+              [RESOURCE_NAME]: resource,
+              ...testSpanMetadata,
+              ...testEnvironmentMetadata,
+              [TEST_STATUS]: 'fail'
+            }
+          })
+        testSpan.setTag('error', err)
+        testSpan.context()._trace.origin = CI_APP_ORIGIN
+        testSpan.finish()
+      }
+      return fail.apply(this, arguments)
+    }
+  }
+}
+
+module.exports = [
+  {
+    name: 'mocha',
+    versions: ['>=5.2.0'],
+    file: 'lib/runner.js',
+    patch (Runner, tracer) {
+      const testEnvironmentMetadata = getTestEnvironmentMetadata('mocha')
+      const sourceRoot = process.cwd()
+      this.wrap(Runner.prototype, 'runTests', createWrapRunTests(tracer, testEnvironmentMetadata, sourceRoot))
+      this.wrap(Runner.prototype, 'runTest', createWrapRunTest(tracer, testEnvironmentMetadata, sourceRoot))
+      this.wrap(Runner.prototype, 'fail', createWrapFail(tracer, testEnvironmentMetadata, sourceRoot))
+    },
+    unpatch (Runner) {
+      this.unwrap(Runner.prototype, 'runTests')
+      this.unwrap(Runner.prototype, 'runTest')
+      this.unwrap(Runner.prototype, 'fail')
+    }
+  },
+  {
+    name: 'mocha-each',
+    versions: ['>=2.0.1'],
+    patch (mochaEach) {
+      return this.wrapExport(mochaEach, wrapMochaEach(mochaEach))
+    },
+    unpatch (mochaEach) {
+      this.unwrapExport(mochaEach)
+    }
+  }
+]

@@ -1,6 +1,5 @@
 'use strict'
 
-const { truncateSpan, normalizeSpan } = require('./tags-processors')
 const Chunk = require('./chunk')
 const log = require('../log')
 
@@ -13,13 +12,8 @@ float64Array[0] = -1
 
 const bigEndian = uInt8Float64Array[7] === 0
 
-function formatSpan (span) {
-  return normalizeSpan(truncateSpan(span, false))
-}
-
 class AgentEncoder {
-  constructor (writer, limit = SOFT_LIMIT) {
-    this._limit = limit
+  constructor (writer) {
     this._traceBytes = new Chunk()
     this._stringBytes = new Chunk()
     this._writer = writer
@@ -47,8 +41,7 @@ class AgentEncoder {
     })
 
     // we can go over the soft limit since the agent has a 50MB hard limit
-    if (this._traceBytes.length > this._limit || this._stringBytes.length > this._limit) {
-      log.debug('Buffer went over soft limit, flushing')
+    if (this._traceBytes.length > SOFT_LIMIT || this._stringBytes.length > SOFT_LIMIT) {
       this._writer.flush()
     }
   }
@@ -64,24 +57,17 @@ class AgentEncoder {
     return buffer
   }
 
-  reset () {
-    this._reset()
-  }
-
   _encode (bytes, trace) {
     this._encodeArrayPrefix(bytes, trace)
 
-    for (let span of trace) {
-      span = formatSpan(span)
-      bytes.reserve(1)
-
+    for (const span of trace) {
       if (span.type) {
-        bytes.buffer[bytes.length++] = 0x8c
+        bytes.push(0x8c)
 
         this._encodeString(bytes, 'type')
         this._encodeString(bytes, span.type)
       } else {
-        bytes.buffer[bytes.length++] = 0x8b
+        bytes.push(0x8b)
       }
 
       this._encodeString(bytes, 'trace_id')
@@ -121,94 +107,49 @@ class AgentEncoder {
 
   _encodeArrayPrefix (bytes, value) {
     const length = value.length
-    const offset = bytes.length
 
-    bytes.reserve(5)
-    bytes.length += 5
-
-    bytes.buffer[offset] = 0xdd
-    bytes.buffer[offset + 1] = length >> 24
-    bytes.buffer[offset + 2] = length >> 16
-    bytes.buffer[offset + 3] = length >> 8
-    bytes.buffer[offset + 4] = length
-  }
-
-  _encodeMapPrefix (bytes, keysLength) {
-    const offset = bytes.length
-
-    bytes.reserve(5)
-    bytes.length += 5
-    bytes.buffer[offset] = 0xdf
-    bytes.buffer[offset + 1] = keysLength >> 24
-    bytes.buffer[offset + 2] = keysLength >> 16
-    bytes.buffer[offset + 3] = keysLength >> 8
-    bytes.buffer[offset + 4] = keysLength
+    bytes.push(0xdd, length >> 24, length >> 16, length >> 8, length)
   }
 
   _encodeByte (bytes, value) {
-    bytes.reserve(1)
-
-    bytes.buffer[bytes.length++] = value
+    bytes.push(value)
   }
 
   _encodeId (bytes, id) {
-    const offset = bytes.length
-
-    bytes.reserve(9)
-    bytes.length += 9
-
     id = id.toArray()
-
-    bytes.buffer[offset] = 0xcf
-    bytes.buffer[offset + 1] = id[0]
-    bytes.buffer[offset + 2] = id[1]
-    bytes.buffer[offset + 3] = id[2]
-    bytes.buffer[offset + 4] = id[3]
-    bytes.buffer[offset + 5] = id[4]
-    bytes.buffer[offset + 6] = id[5]
-    bytes.buffer[offset + 7] = id[6]
-    bytes.buffer[offset + 8] = id[7]
+    bytes.push(0xcf, id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7])
   }
 
   _encodeInteger (bytes, value) {
-    const offset = bytes.length
-
-    bytes.reserve(5)
-    bytes.length += 5
-
-    bytes.buffer[offset] = 0xce
-    bytes.buffer[offset + 1] = value >> 24
-    bytes.buffer[offset + 2] = value >> 16
-    bytes.buffer[offset + 3] = value >> 8
-    bytes.buffer[offset + 4] = value
+    bytes.push(0xce, value >> 24, value >> 16, value >> 8, value)
   }
 
   _encodeLong (bytes, value) {
-    const offset = bytes.length
     const hi = (value / Math.pow(2, 32)) >> 0
     const lo = value >>> 0
 
-    bytes.reserve(9)
-    bytes.length += 9
-
-    bytes.buffer[offset] = 0xcf
-    bytes.buffer[offset + 1] = hi >> 24
-    bytes.buffer[offset + 2] = hi >> 16
-    bytes.buffer[offset + 3] = hi >> 8
-    bytes.buffer[offset + 4] = hi
-    bytes.buffer[offset + 5] = lo >> 24
-    bytes.buffer[offset + 6] = lo >> 16
-    bytes.buffer[offset + 7] = lo >> 8
-    bytes.buffer[offset + 8] = lo
+    bytes.push(0xcf, hi >> 24, hi >> 16, hi >> 8, hi, lo >> 24, lo >> 16, lo >> 8, lo)
   }
 
   _encodeMap (bytes, value) {
-    const keys = Object.keys(value)
-    const validKeys = keys.filter(key => typeof value[key] === 'string' || typeof value[key] === 'number')
+    const keys = []
+    const allKeys = Object.keys(value)
 
-    this._encodeMapPrefix(bytes, validKeys.length)
+    let key = ''
 
-    for (const key of validKeys) {
+    for (let i = 0, l = allKeys.length; i < l; i++) {
+      key = allKeys[i]
+      if (typeof value[key] !== 'function') {
+        keys.push(key)
+      }
+    }
+
+    const length = keys.length
+
+    bytes.push(0xdf, length >> 24, length >> 16, length >> 8, length)
+
+    for (let i = 0; i < length; i++) {
+      key = keys[i]
       this._encodeString(bytes, key)
       this._encodeValue(bytes, value[key])
     }
@@ -238,19 +179,15 @@ class AgentEncoder {
   _encodeFloat (bytes, value) {
     float64Array[0] = value
 
-    const offset = bytes.length
-    bytes.reserve(9)
-    bytes.length += 9
-
-    bytes.buffer[offset] = 0xcb
+    bytes.push(0xcb)
 
     if (bigEndian) {
       for (let i = 0; i <= 7; i++) {
-        bytes.buffer[offset + i + 1] = uInt8Float64Array[i]
+        bytes.push(uInt8Float64Array[i])
       }
     } else {
       for (let i = 7; i >= 0; i--) {
-        bytes.buffer[bytes.length - i - 1] = uInt8Float64Array[i]
+        bytes.push(uInt8Float64Array[i])
       }
     }
   }

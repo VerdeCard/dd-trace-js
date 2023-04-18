@@ -1,10 +1,5 @@
 'use strict'
 
-require('./setup/tap')
-
-const { expect } = require('chai')
-const { storage } = require('../../datadog-core')
-
 /* eslint-disable no-console */
 
 describe('log', () => {
@@ -46,14 +41,6 @@ describe('log', () => {
         .debug('debug')
         .reset()
     }).to.not.throw()
-  })
-
-  it('should call the logger in a noop context', () => {
-    logger.debug = () => {
-      expect(storage.getStore()).to.have.property('noop', true)
-    }
-
-    log.use(logger).debug('debug')
   })
 
   describe('debug', () => {
@@ -267,10 +254,7 @@ describe('log', () => {
     it('should log a deprecation warning', () => {
       log.deprecate('test', 'message')
 
-      expect(console.error).to.have.been.calledOnce
-      const consoleErrorArg = console.error.getCall(0).args[0]
-      expect(typeof consoleErrorArg).to.be.eq('object')
-      expect(consoleErrorArg.message).to.be.eq('message')
+      expect(console.error).to.have.been.calledWith('message')
     })
 
     it('should only log once for a given code', () => {
@@ -281,87 +265,29 @@ describe('log', () => {
     })
   })
 
-  describe('logWriter', () => {
-    let logWriter
-    beforeEach(() => {
-      logWriter = require('../src/log/writer')
-    })
-
-    afterEach(() => {
-      logWriter.reset()
-    })
-
-    describe('error', () => {
-      it('should call logger error', () => {
-        logWriter.error(error)
-
-        expect(console.error).to.have.been.calledOnceWith(error)
+  describe('tracing', () => {
+    it('should be disabled inside logging', (done) => {
+      let onceDone = () => {
+        onceDone = () => {}
+        done()
+      }
+      const tracer = require('../../dd-trace').init({
+        debug: true,
+        plugins: false,
+        service: 'test',
+        logger: {
+          debug: () => {
+            expect(!!tracer.scope().active().context()._noop).to.equal(true)
+            onceDone()
+          },
+          info: () => {},
+          warn: () => {},
+          error: () => {}
+        }
       })
-
-      it('should call console.error no matter enable flag value', () => {
-        logWriter.toggle(false)
-        logWriter.error(error)
-
-        expect(console.error).to.have.been.calledOnceWith(error)
-      })
-    })
-
-    describe('warn', () => {
-      it('should call logger warn', () => {
-        logWriter.warn('warn')
-
-        expect(console.warn).to.have.been.calledOnceWith('warn')
-      })
-
-      it('should call logger debug if warn is not provided', () => {
-        logWriter.use(logger)
-        logWriter.warn('warn')
-
-        expect(logger.debug).to.have.been.calledOnceWith('warn')
-      })
-
-      it('should call console.warn no matter enable flag value', () => {
-        logWriter.toggle(false)
-        logWriter.warn('warn')
-
-        expect(console.warn).to.have.been.calledOnceWith('warn')
-      })
-    })
-
-    describe('info', () => {
-      it('should call logger info', () => {
-        logWriter.info('info')
-
-        expect(console.info).to.have.been.calledOnceWith('info')
-      })
-
-      it('should call logger debug if info is not provided', () => {
-        logWriter.use(logger)
-        logWriter.info('info')
-
-        expect(logger.debug).to.have.been.calledOnceWith('info')
-      })
-
-      it('should call console.info no matter enable flag value', () => {
-        logWriter.toggle(false)
-        logWriter.info('info')
-
-        expect(console.info).to.have.been.calledOnceWith('info')
-      })
-    })
-
-    describe('debug', () => {
-      it('should call logger debug', () => {
-        logWriter.debug('debug')
-
-        expect(console.debug).to.have.been.calledOnceWith('debug')
-      })
-
-      it('should call console.debug no matter enable flag value', () => {
-        logWriter.toggle(false)
-        logWriter.debug('debug')
-
-        expect(console.debug).to.have.been.calledOnceWith('debug')
+      tracer.trace('testing.testing', () => {
+        expect(!!tracer.scope().active().context()._noop).to.equal(false)
+        log.debug()
       })
     })
   })

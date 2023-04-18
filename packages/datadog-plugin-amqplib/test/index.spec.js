@@ -1,7 +1,9 @@
 'use strict'
 
 const agent = require('../../dd-trace/test/plugins/agent')
-const { ERROR_MESSAGE, ERROR_STACK, ERROR_TYPE } = require('../../dd-trace/src/constants')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   let tracer
@@ -9,7 +11,7 @@ describe('Plugin', () => {
   let channel
 
   describe('amqplib', () => {
-    withVersions('amqplib', 'amqplib', version => {
+    withVersions(plugin, 'amqplib', version => {
       beforeEach(() => {
         tracer = require('../../dd-trace')
       })
@@ -19,35 +21,29 @@ describe('Plugin', () => {
       })
 
       describe('without configuration', () => {
-        beforeEach(done => {
-          require(`../../../versions/amqplib@${version}`).get('amqplib/callback_api')
-            .connect((err, conn) => {
-              connection = conn
-
-              if (err != null) {
-                return done(err)
-              }
-
-              conn.createChannel((err, ch) => {
-                channel = ch
-                done(err)
-              })
-            })
+        before(() => {
+          return agent.load('amqplib')
         })
 
-        describe('without plugin', () => {
-          it('should run commands normally', done => {
-            channel.assertQueue('test', {}, () => { done() })
-          })
+        after(() => {
+          return agent.close()
         })
 
         describe('when using a callback', () => {
-          before(() => {
-            return agent.load('amqplib')
-          })
+          beforeEach(done => {
+            require(`../../../versions/amqplib@${version}`).get('amqplib/callback_api')
+              .connect((err, conn) => {
+                connection = conn
 
-          after(() => {
-            return agent.close({ ritmReset: false })
+                if (err != null) {
+                  return done(err)
+                }
+
+                conn.createChannel((err, ch) => {
+                  channel = ch
+                  done(err)
+                })
+              })
           })
 
           describe('when sending commands', () => {
@@ -55,14 +51,14 @@ describe('Plugin', () => {
               agent
                 .use(traces => {
                   const span = traces[0][0]
+
                   expect(span).to.have.property('name', 'amqp.command')
                   expect(span).to.have.property('service', 'test-amqp')
                   expect(span).to.have.property('resource', 'queue.declare test')
                   expect(span).to.not.have.property('type')
                   expect(span.meta).to.have.property('span.kind', 'client')
                   expect(span.meta).to.have.property('out.host', 'localhost')
-                  expect(span.meta).to.have.property('component', 'amqplib')
-                  expect(span.metrics).to.have.property('network.destination.port', 5672)
+                  expect(span.metrics).to.have.property('out.port', 5672)
                 }, 2)
                 .then(done)
                 .catch(done)
@@ -81,8 +77,7 @@ describe('Plugin', () => {
                   expect(span).to.not.have.property('type')
                   expect(span.meta).to.have.property('span.kind', 'client')
                   expect(span.meta).to.have.property('out.host', 'localhost')
-                  expect(span.meta).to.have.property('component', 'amqplib')
-                  expect(span.metrics).to.have.property('network.destination.port', 5672)
+                  expect(span.metrics).to.have.property('out.port', 5672)
                 }, 3)
                 .then(done)
                 .catch(done)
@@ -99,10 +94,9 @@ describe('Plugin', () => {
                   const span = traces[0][0]
 
                   expect(span).to.have.property('error', 1)
-                  expect(span.meta).to.have.property(ERROR_TYPE, error.name)
-                  expect(span.meta).to.have.property(ERROR_MESSAGE, error.message)
-                  expect(span.meta).to.have.property(ERROR_STACK, error.stack)
-                  expect(span.meta).to.have.property('component', 'amqplib')
+                  expect(span.meta).to.have.property('error.type', error.name)
+                  expect(span.meta).to.have.property('error.msg', error.message)
+                  expect(span.meta).to.have.property('error.stack', error.stack)
                 }, 2)
                 .then(done)
                 .catch(done)
@@ -128,8 +122,7 @@ describe('Plugin', () => {
                   expect(span.meta).to.have.property('out.host', 'localhost')
                   expect(span.meta).to.have.property('span.kind', 'producer')
                   expect(span.meta).to.have.property('amqp.routingKey', 'routingKey')
-                  expect(span.meta).to.have.property('component', 'amqplib')
-                  expect(span.metrics).to.have.property('network.destination.port', 5672)
+                  expect(span.metrics).to.have.property('out.port', 5672)
                 }, 3)
                 .then(done)
                 .catch(done)
@@ -146,10 +139,9 @@ describe('Plugin', () => {
                   const span = traces[0][0]
 
                   expect(span).to.have.property('error', 1)
-                  expect(span.meta).to.have.property(ERROR_TYPE, error.name)
-                  expect(span.meta).to.have.property(ERROR_MESSAGE, error.message)
-                  expect(span.meta).to.have.property(ERROR_STACK, error.stack)
-                  expect(span.meta).to.have.property('component', 'amqplib')
+                  expect(span.meta).to.have.property('error.type', error.name)
+                  expect(span.meta).to.have.property('error.msg', error.message)
+                  expect(span.meta).to.have.property('error.stack', error.stack)
                 }, 2)
                 .then(done)
                 .catch(done)
@@ -170,13 +162,15 @@ describe('Plugin', () => {
               agent
                 .use(traces => {
                   const span = traces[0][0]
+
                   expect(span).to.have.property('name', 'amqp.command')
                   expect(span).to.have.property('service', 'test-amqp')
                   expect(span).to.have.property('resource', `basic.deliver ${queue}`)
                   expect(span).to.have.property('type', 'worker')
+                  expect(span.meta).to.have.property('out.host', 'localhost')
                   expect(span.meta).to.have.property('span.kind', 'consumer')
                   expect(span.meta).to.have.property('amqp.consumerTag', consumerTag)
-                  expect(span.meta).to.have.property('component', 'amqplib')
+                  expect(span.metrics).to.have.property('out.port', 5672)
                 }, 5)
                 .then(done)
                 .catch(done)
@@ -195,6 +189,8 @@ describe('Plugin', () => {
             })
 
             it('should run the command callback in the parent context', done => {
+              if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
               channel.assertQueue('', {}, (err, ok) => {
                 if (err) return done(err)
 
@@ -206,6 +202,8 @@ describe('Plugin', () => {
             })
 
             it('should run the delivery callback in the producer context', done => {
+              if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
               channel.assertQueue('', {}, (err, ok) => {
                 if (err) return done(err)
 
@@ -248,6 +246,8 @@ describe('Plugin', () => {
           })
 
           it('should run the callback in the parent context', done => {
+            if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
             channel.assertQueue('test', {})
               .then(() => {
                 expect(tracer.scope().active()).to.be.null
@@ -264,7 +264,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(done => {

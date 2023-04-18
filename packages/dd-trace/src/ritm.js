@@ -3,113 +3,61 @@
 const path = require('path')
 const Module = require('module')
 const parse = require('module-details-from-path')
-const dc = require('../../diagnostics_channel')
 
-const origRequire = Module.prototype.require
+module.exports = function hook (modules, onrequire) {
+  if (!hook.orig) {
+    hook.orig = Module.prototype.require
 
-// derived from require-in-the-middle@3 with tweaks
-
-module.exports = Hook
-
-let moduleHooks = Object.create(null)
-let cache = Object.create(null)
-let patching = Object.create(null)
-let patchedRequire = null
-const moduleLoadStartChannel = dc.channel('dd-trace:moduleLoadStart')
-const moduleLoadEndChannel = dc.channel('dd-trace:moduleLoadEnd')
-
-function Hook (modules, options, onrequire) {
-  if (!(this instanceof Hook)) return new Hook(modules, options, onrequire)
-  if (typeof modules === 'function') {
-    onrequire = modules
-    modules = null
-    options = {}
-  } else if (typeof options === 'function') {
-    onrequire = options
-    options = {}
-  }
-
-  modules = modules || []
-  options = options || {}
-
-  this.modules = modules
-  this.options = options
-  this.onrequire = onrequire
-
-  if (Array.isArray(modules)) {
-    for (const mod of modules) {
-      const hooks = moduleHooks[mod]
-
-      if (hooks) {
-        hooks.push(onrequire)
-      } else {
-        moduleHooks[mod] = [onrequire]
-      }
+    Module.prototype.require = function (request) {
+      return hook.require.apply(this, arguments)
     }
   }
 
-  if (patchedRequire) return
+  hook.cache = {}
 
-  patchedRequire = Module.prototype.require = function (request) {
+  const patching = {}
+
+  hook.require = function (request) {
     const filename = Module._resolveFilename(request, this)
     const core = filename.indexOf(path.sep) === -1
-    let name, basedir, hooks
+    let name, basedir
+
     // return known patched modules immediately
-    if (cache[filename]) {
+    if (hook.cache.hasOwnProperty(filename)) {
       // require.cache was potentially altered externally
-      if (require.cache[filename] && require.cache[filename].exports !== cache[filename].original) {
+      if (require.cache[filename] && require.cache[filename].exports !== hook.cache[filename].original) {
         return require.cache[filename].exports
       }
 
-      return cache[filename].exports
+      return hook.cache[filename].exports
     }
 
     // Check if this module has a patcher in-progress already.
     // Otherwise, mark this module as patching in-progress.
     const patched = patching[filename]
-    if (patched) {
-      // If it's already patched, just return it as-is.
-      return origRequire.apply(this, arguments)
-    } else {
+    if (!patched) {
       patching[filename] = true
     }
 
-    const payload = {
-      filename,
-      request
-    }
+    const exports = hook.orig.apply(this, arguments)
 
-    if (moduleLoadStartChannel.hasSubscribers) {
-      moduleLoadStartChannel.publish(payload)
-    }
-    const exports = origRequire.apply(this, arguments)
-    payload.module = exports
-    if (moduleLoadEndChannel.hasSubscribers) {
-      moduleLoadEndChannel.publish(payload)
-    }
+    // If it's already patched, just return it as-is.
+    if (patched) return exports
 
     // The module has already been loaded,
     // so the patching mark can be cleaned up.
     delete patching[filename]
 
     if (core) {
-      hooks = moduleHooks[filename]
-      if (!hooks) return exports // abort if module name isn't on whitelist
+      if (modules && modules.indexOf(filename) === -1) return exports // abort if module name isn't on whitelist
       name = filename
     } else {
-      const inAWSLambda = process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined
-      const hasLambdaHandler = process.env.DD_LAMBDA_HANDLER !== undefined
-      const segments = filename.split(path.sep)
-      const filenameFromNodeModule = segments.lastIndexOf('node_modules') !== -1
-      // decide how to assign the stat
-      // first case will only happen when patching an AWS Lambda Handler
-      const stat = inAWSLambda && hasLambdaHandler && !filenameFromNodeModule ? { name: filename } : parse(filename)
+      const stat = parse(filename)
       if (!stat) return exports // abort if filename could not be parsed
       name = stat.name
       basedir = stat.basedir
 
-      hooks = moduleHooks[name]
-      if (!hooks) return exports // abort if module name isn't on whitelist
+      if (modules && modules.indexOf(name) === -1) return exports // abort if module name isn't on whitelist
 
       // figure out if this is the main module file, or a file inside the module
       const paths = Module._resolveLookupPaths(name, this, true)
@@ -127,37 +75,10 @@ function Hook (modules, options, onrequire) {
 
     // ensure that the cache entry is assigned a value before calling
     // onrequire, in case calling onrequire requires the same module.
-    cache[filename] = { exports }
-    cache[filename].original = exports
+    hook.cache[filename] = { exports }
+    hook.cache[filename].original = exports
+    hook.cache[filename].exports = onrequire(exports, name, basedir)
 
-    for (const hook of hooks) {
-      cache[filename].exports = hook(cache[filename].exports, name, basedir)
-    }
-
-    return cache[filename].exports
-  }
-}
-
-Hook.reset = function () {
-  Module.prototype.require = origRequire
-  patchedRequire = null
-  patching = Object.create(null)
-  cache = Object.create(null)
-  moduleHooks = Object.create(null)
-}
-
-Hook.prototype.unhook = function () {
-  for (const mod of this.modules) {
-    const hooks = (moduleHooks[mod] || []).filter(hook => hook !== this.onrequire)
-
-    if (hooks.length > 0) {
-      moduleHooks[mod] = hooks
-    } else {
-      delete moduleHooks[mod]
-    }
-  }
-
-  if (Object.keys(moduleHooks).length === 0) {
-    Hook.reset()
+    return hook.cache[filename].exports
   }
 }

@@ -3,16 +3,14 @@
 const pick = require('lodash.pick')
 const id = require('../../id')
 const DatadogSpanContext = require('../span_context')
+const NoopSpanContext = require('../../noop/span_context')
 const log = require('../../log')
-const TraceState = require('./tracestate')
-
-const { AUTO_KEEP, AUTO_REJECT, USER_KEEP } = require('../../../../../ext/priority')
 
 const traceKey = 'x-datadog-trace-id'
 const spanKey = 'x-datadog-parent-id'
 const originKey = 'x-datadog-origin'
 const samplingKey = 'x-datadog-sampling-priority'
-const tagsKey = 'x-datadog-tags'
+const sampleKey = 'x-datadog-sampled'
 const baggagePrefix = 'ot-baggage-'
 const b3TraceKey = 'x-b3-traceid'
 const b3TraceExpr = /^([0-9a-f]{16}){1,2}$/i
@@ -25,20 +23,9 @@ const b3HeaderKey = 'b3'
 const sqsdHeaderHey = 'x-aws-sqsd-attr-_datadog'
 const b3HeaderExpr = /^(([0-9a-f]{16}){1,2}-[0-9a-f]{16}(-[01d](-[0-9a-f]{16})?)?|[01d])$/i
 const baggageExpr = new RegExp(`^${baggagePrefix}(.+)$`)
-const tagKeyExpr = /^_dd\.p\.[\x21-\x2b\x2d-\x7e]+$/ // ASCII minus spaces and commas
-const tagValueExpr = /^[\x20-\x2b\x2d-\x7e]*$/ // ASCII minus commas
 const ddKeys = [traceKey, spanKey, samplingKey, originKey]
 const b3Keys = [b3TraceKey, b3SpanKey, b3ParentKey, b3SampledKey, b3FlagsKey, b3HeaderKey]
 const logKeys = ddKeys.concat(b3Keys)
-const traceparentExpr = /^([a-f0-9]{2})-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})(-.*)?$/i
-const traceparentKey = 'traceparent'
-// Origin value in tracestate replaces '~', ',' and ';' with '_"
-const tracestateOriginFilter = /[^\x20-\x2b\x2d-\x3a\x3c-\x7d]/g
-// Tag keys in tracestate replace ' ', ',' and '=' with '_'
-const tracestateTagKeyFilter = /[^\x21-\x2b\x2d-\x3c\x3e-\x7e]/g
-// Tag values in tracestate replace ',', '~' and ';' with '_'
-const tracestateTagValueFilter = /[^\x20-\x2b\x2d-\x3a\x3c-\x7d]/g
-const invalidSegment = /^0+$/
 
 class TextMapPropagator {
   constructor (config) {
@@ -46,11 +33,14 @@ class TextMapPropagator {
   }
 
   inject (spanContext, carrier) {
+    carrier[traceKey] = spanContext.toTraceId()
+    carrier[spanKey] = spanContext.toSpanId()
+    carrier[sampleKey] = spanContext._traceFlags.sampled ? '1' : '0'
+
+    this._injectOrigin(spanContext, carrier)
+    this._injectSamplingPriority(spanContext, carrier)
     this._injectBaggageItems(spanContext, carrier)
-    this._injectDatadog(spanContext, carrier)
-    this._injectB3MultipleHeaders(spanContext, carrier)
-    this._injectB3SingleHeader(spanContext, carrier)
-    this._injectTraceparent(spanContext, carrier)
+    this._injectB3(spanContext, carrier)
 
     log.debug(() => `Inject into carrier: ${JSON.stringify(pick(carrier, logKeys))}.`)
   }
@@ -60,20 +50,13 @@ class TextMapPropagator {
 
     if (!spanContext) return spanContext
 
+    this._extractOrigin(carrier, spanContext)
+    this._extractBaggageItems(carrier, spanContext)
+    this._extractSamplingPriority(carrier, spanContext)
+
     log.debug(() => `Extract from carrier: ${JSON.stringify(pick(carrier, logKeys))}.`)
 
     return spanContext
-  }
-
-  _injectDatadog (spanContext, carrier) {
-    if (!this._hasPropagationStyle('inject', 'datadog')) return
-
-    carrier[traceKey] = spanContext.toTraceId()
-    carrier[spanKey] = spanContext.toSpanId()
-
-    this._injectOrigin(spanContext, carrier)
-    this._injectSamplingPriority(spanContext, carrier)
-    this._injectTags(spanContext, carrier)
   }
 
   _injectOrigin (spanContext, carrier) {
@@ -98,188 +81,52 @@ class TextMapPropagator {
     })
   }
 
-  _injectTags (spanContext, carrier) {
-    const trace = spanContext._trace
+  _injectB3 (spanContext, carrier) {
+    if (!this._config.experimental.b3) return
 
-    if (this._config.tagsHeaderMaxLength === 0) {
-      log.debug('Trace tag propagation is disabled, skipping injection.')
-      return
-    }
+    carrier[b3TraceKey] = spanContext._traceId.toString('hex')
+    carrier[b3SpanKey] = spanContext._spanId.toString('hex')
+    carrier[b3SampledKey] = spanContext._traceFlags.sampled ? '1' : '0'
 
-    const tags = []
-
-    for (const key in trace.tags) {
-      if (!trace.tags[key] || !key.startsWith('_dd.p.')) continue
-      if (!this._validateTagKey(key) || !this._validateTagValue(trace.tags[key])) {
-        log.error('Trace tags from span are invalid, skipping injection.')
-        return
-      }
-
-      tags.push(`${key}=${trace.tags[key]}`)
-    }
-
-    const header = tags.join(',')
-
-    if (header.length > this._config.tagsHeaderMaxLength) {
-      log.error('Trace tags from span are too large, skipping injection.')
-    } else if (header) {
-      carrier[tagsKey] = header
-    }
-  }
-
-  _injectB3MultipleHeaders (spanContext, carrier) {
-    const hasB3 = this._hasPropagationStyle('inject', 'b3')
-    const hasB3multi = this._hasPropagationStyle('inject', 'b3multi')
-    if (!(hasB3 || hasB3multi)) return
-
-    carrier[b3TraceKey] = this._getB3TraceId(spanContext)
-    carrier[b3SpanKey] = spanContext._spanId.toString(16)
-    carrier[b3SampledKey] = spanContext._sampling.priority >= AUTO_KEEP ? '1' : '0'
-
-    if (spanContext._sampling.priority > AUTO_KEEP) {
+    if (spanContext._traceFlags.debug) {
       carrier[b3FlagsKey] = '1'
     }
 
     if (spanContext._parentId) {
-      carrier[b3ParentKey] = spanContext._parentId.toString(16)
+      carrier[b3ParentKey] = spanContext._parentId.toString('hex')
     }
-  }
-
-  _injectB3SingleHeader (spanContext, carrier) {
-    const hasB3SingleHeader = this._hasPropagationStyle('inject', 'b3 single header')
-    if (!hasB3SingleHeader) return null
-
-    const traceId = this._getB3TraceId(spanContext)
-    const spanId = spanContext._spanId.toString(16)
-    const sampled = spanContext._sampling.priority >= AUTO_KEEP ? '1' : '0'
-
-    carrier[b3HeaderKey] = `${traceId}-${spanId}-${sampled}`
-    if (spanContext._parentId) {
-      carrier[b3HeaderKey] += '-' + spanContext._parentId.toString(16)
-    }
-  }
-
-  _injectTraceparent (spanContext, carrier) {
-    if (!this._hasPropagationStyle('inject', 'tracecontext')) return
-
-    const {
-      _sampling: { priority, mechanism },
-      _tracestate: ts = new TraceState(),
-      _trace: { origin, tags }
-    } = spanContext
-
-    carrier[traceparentKey] = spanContext.toTraceparent()
-
-    ts.forVendor('dd', state => {
-      state.set('s', priority)
-      if (mechanism) {
-        state.set('t.dm', mechanism)
-      }
-
-      if (typeof origin === 'string') {
-        const originValue = origin
-          .replace(tracestateOriginFilter, '_')
-          .replace(/[\x3d]/g, '~')
-
-        state.set('o', originValue)
-      }
-
-      for (const key in tags) {
-        if (!tags[key] || !key.startsWith('_dd.p.')) continue
-
-        const tagKey = 't.' + key.slice(6)
-          .replace(tracestateTagKeyFilter, '_')
-
-        const tagValue = tags[key]
-          .toString()
-          .replace(tracestateTagValueFilter, '_')
-          .replace(/[\x3d]/g, '~')
-
-        state.set(tagKey, tagValue)
-      }
-    })
-
-    carrier.tracestate = ts.toString()
-  }
-
-  _hasPropagationStyle (mode, name) {
-    return this._config.tracePropagationStyle[mode].includes(name)
   }
 
   _extractSpanContext (carrier) {
-    for (const extractor of this._config.tracePropagationStyle.extract) {
-      let spanContext = null
-      switch (extractor) {
-        case 'datadog':
-          spanContext = this._extractDatadogContext(carrier)
-          break
-        case 'tracecontext':
-          spanContext = this._extractTraceparentContext(carrier)
-          break
-        case 'b3': // TODO: should match "b3 single header" in next major
-        case 'b3multi':
-          spanContext = this._extractB3MultiContext(carrier)
-          break
-        case 'b3 single header': // TODO: delete in major after singular "b3"
-          spanContext = this._extractB3SingleContext(carrier)
-          break
-      }
+    const context = this._extractContext(carrier)
 
-      if (spanContext !== null) {
-        return spanContext
-      }
+    if (!context) return null
+
+    if (context.traceFlags.sampled !== false) {
+      return new DatadogSpanContext(context)
+    } else {
+      return new NoopSpanContext(context)
     }
+  }
 
-    return this._extractSqsdContext(carrier)
+  _extractContext (carrier) {
+    return this._extractDatadogContext(carrier) || this._extractB3Context(carrier) || this._extractSqsdContext(carrier)
   }
 
   _extractDatadogContext (carrier) {
-    const spanContext = this._extractGenericContext(carrier, traceKey, spanKey, 10)
+    const sampled = this._isSampled(carrier[sampleKey])
 
-    if (spanContext) {
-      this._extractOrigin(carrier, spanContext)
-      this._extractBaggageItems(carrier, spanContext)
-      this._extractSamplingPriority(carrier, spanContext)
-      this._extractTags(carrier, spanContext)
-    }
-
-    return spanContext
+    return this._extractGenericContext(carrier, traceKey, spanKey, { sampled }, 10)
   }
 
-  _extractB3MultiContext (carrier) {
-    const b3 = this._extractB3MultipleHeaders(carrier)
-    if (!b3) return null
-    return this._extractB3Context(b3)
-  }
+  _extractB3Context (carrier) {
+    if (!this._config.experimental.b3) return null
 
-  _extractB3SingleContext (carrier) {
-    if (!b3HeaderExpr.test(carrier[b3HeaderKey])) return null
-    const b3 = this._extractB3SingleHeader(carrier)
-    if (!b3) return null
-    return this._extractB3Context(b3)
-  }
-
-  _extractB3Context (b3) {
+    const b3 = this._extractB3Headers(carrier)
     const debug = b3[b3FlagsKey] === '1'
-    const priority = this._getPriority(b3[b3SampledKey], debug)
-    const spanContext = this._extractGenericContext(b3, b3TraceKey, b3SpanKey, 16)
+    const sampled = this._isSampled(b3[b3SampledKey], debug)
 
-    if (priority !== undefined) {
-      if (!spanContext) {
-        // B3 can force a sampling decision without providing IDs
-        return new DatadogSpanContext({
-          traceId: id(),
-          spanId: null,
-          sampling: { priority }
-        })
-      }
-
-      spanContext._sampling.priority = priority
-    }
-
-    this._extract128BitTraceId(b3[b3TraceKey], spanContext)
-
-    return spanContext
+    return this._extractGenericContext(b3, b3TraceKey, b3SpanKey, { sampled, debug })
   }
 
   _extractSqsdContext (carrier) {
@@ -296,115 +143,53 @@ class TextMapPropagator {
     return this._extractDatadogContext(parsed)
   }
 
-  _extractTraceparentContext (carrier) {
-    const headerValue = carrier[traceparentKey]
-    if (!headerValue) {
-      return null
+  _extractGenericContext (carrier, traceKey, spanKey, traceFlags, radix) {
+    if (carrier[traceKey] && carrier[spanKey]) {
+      return {
+        traceId: id(carrier[traceKey], radix),
+        spanId: id(carrier[spanKey], radix),
+        traceFlags
+      }
+    } else if (typeof traceFlags.sampled === 'boolean') {
+      return {
+        traceId: id(),
+        spanId: null,
+        traceFlags
+      }
     }
-    const matches = headerValue.trim().match(traceparentExpr)
-    if (matches.length) {
-      const [ version, traceId, spanId, flags, tail ] = matches.slice(1)
-      const traceparent = { version }
-      const tracestate = TraceState.fromString(carrier.tracestate)
-      if (invalidSegment.test(traceId)) return null
-      if (invalidSegment.test(spanId)) return null
 
-      // Version ff is considered invalid
-      if (version === 'ff') return null
-
-      // Version 00 should have no tail, but future versions may
-      if (tail && version === '00') return null
-
-      const spanContext = new DatadogSpanContext({
-        traceId: id(traceId, 16),
-        spanId: id(spanId, 16),
-        sampling: { priority: parseInt(flags, 10) & 1 ? 1 : 0 },
-        traceparent,
-        tracestate
-      })
-
-      this._extract128BitTraceId(traceId, spanContext)
-
-      tracestate.forVendor('dd', state => {
-        for (const [key, value] of state.entries()) {
-          switch (key) {
-            case 's': {
-              const priority = parseInt(value, 10)
-              if (!Number.isInteger(priority)) continue
-              if (
-                (spanContext._sampling.priority === 1 && priority > 0) ||
-                (spanContext._sampling.priority === 0 && priority < 0)
-              ) {
-                spanContext._sampling.priority = priority
-              }
-              break
-            }
-            case 'o':
-              spanContext._trace.origin = value
-              break
-            case 't.dm': {
-              const mechanism = parseInt(value, 10)
-              if (Number.isInteger(mechanism)) {
-                spanContext._sampling.mechanism = mechanism
-                spanContext._trace.tags['_dd.p.dm'] = mechanism
-              }
-              break
-            }
-            default:
-              if (!key.startsWith('t.')) continue
-              spanContext._trace.tags[`_dd.p.${key.slice(2)}`] = value
-                .replace(/[\x7e]/gm, '=')
-          }
-        }
-      })
-
-      this._extractBaggageItems(carrier, spanContext)
-      return spanContext
-    }
     return null
   }
 
-  _extractGenericContext (carrier, traceKey, spanKey, radix) {
-    if (carrier[traceKey] && carrier[spanKey]) {
-      if (invalidSegment.test(carrier[traceKey])) return null
-
-      return new DatadogSpanContext({
-        traceId: id(carrier[traceKey], radix),
-        spanId: id(carrier[spanKey], radix)
-      })
+  _extractB3Headers (carrier) {
+    if (b3HeaderExpr.test(carrier[b3HeaderKey])) {
+      return this._extractB3SingleHeader(carrier)
+    } else {
+      return this._extractB3MultipleHeaders(carrier)
     }
-
-    return null
   }
 
   _extractB3MultipleHeaders (carrier) {
-    let empty = true
     const b3 = {}
 
     if (b3TraceExpr.test(carrier[b3TraceKey]) && b3SpanExpr.test(carrier[b3SpanKey])) {
       b3[b3TraceKey] = carrier[b3TraceKey]
       b3[b3SpanKey] = carrier[b3SpanKey]
-      empty = false
     }
 
     if (carrier[b3SampledKey]) {
       b3[b3SampledKey] = carrier[b3SampledKey]
-      empty = false
     }
 
     if (carrier[b3FlagsKey]) {
       b3[b3FlagsKey] = carrier[b3FlagsKey]
-      empty = false
     }
 
-    return empty ? null : b3
+    return b3
   }
 
   _extractB3SingleHeader (carrier) {
-    const header = carrier[b3HeaderKey]
-    if (!header) return null
-
-    const parts = header.split('-')
+    const parts = carrier[b3HeaderKey].split('-')
 
     if (parts[0] === 'd') {
       return {
@@ -418,15 +203,12 @@ class TextMapPropagator {
     } else {
       const b3 = {
         [b3TraceKey]: parts[0],
-        [b3SpanKey]: parts[1]
+        [b3SpanKey]: parts[1],
+        [b3SampledKey]: parts[2] !== '0' ? '1' : '0'
       }
 
-      if (parts[2]) {
-        b3[b3SampledKey] = parts[2] !== '0' ? '1' : '0'
-
-        if (parts[2] === 'd') {
-          b3[b3FlagsKey] = '1'
-        }
+      if (parts[2] === 'd') {
+        b3[b3FlagsKey] = '1'
       }
 
       return b3
@@ -455,77 +237,18 @@ class TextMapPropagator {
     const priority = parseInt(carrier[samplingKey], 10)
 
     if (Number.isInteger(priority)) {
-      spanContext._sampling.priority = priority
+      spanContext._sampling.priority = parseInt(carrier[samplingKey], 10)
     }
   }
 
-  _extractTags (carrier, spanContext) {
-    if (!carrier[tagsKey]) return
-
-    const trace = spanContext._trace
-
-    if (this._config.tagsHeaderMaxLength === 0) {
-      log.debug('Trace tag propagation is disabled, skipping extraction.')
-    } else if (carrier[tagsKey].length > this._config.tagsHeaderMaxLength) {
-      log.error('Trace tags from carrier are too large, skipping extraction.')
-    } else {
-      const pairs = carrier[tagsKey].split(',')
-      const tags = {}
-
-      for (const pair of pairs) {
-        const [key, ...rest] = pair.split('=')
-        const value = rest.join('=')
-
-        if (!this._validateTagKey(key) || !this._validateTagValue(value)) {
-          log.error('Trace tags from carrier are invalid, skipping extraction.')
-          return
-        }
-
-        tags[key] = value
-      }
-
-      Object.assign(trace.tags, tags)
-    }
-  }
-
-  _extract128BitTraceId (traceId, spanContext) {
-    if (!spanContext) return
-
-    const buffer = spanContext._traceId.toBuffer()
-
-    if (buffer.length !== 16) return
-
-    const tid = traceId.substring(0, 16)
-
-    if (tid === '0000000000000000') return
-
-    spanContext._trace.tags['_dd.p.tid'] = tid
-  }
-
-  _validateTagKey (key) {
-    return tagKeyExpr.test(key)
-  }
-
-  _validateTagValue (value) {
-    return tagValueExpr.test(value)
-  }
-
-  _getPriority (sampled, debug) {
-    if (debug) {
-      return USER_KEEP
-    } else if (sampled === '1') {
-      return AUTO_KEEP
+  _isSampled (sampled, debug) {
+    if (debug || sampled === '1') {
+      return true
     } else if (sampled === '0') {
-      return AUTO_REJECT
-    }
-  }
-
-  _getB3TraceId (spanContext) {
-    if (spanContext._traceId.toBuffer().length <= 8 && spanContext._trace.tags['_dd.p.tid']) {
-      return spanContext._trace.tags['_dd.p.tid'] + spanContext._traceId.toString(16)
+      return false
     }
 
-    return spanContext._traceId.toString(16)
+    return null
   }
 }
 

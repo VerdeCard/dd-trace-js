@@ -1,17 +1,15 @@
 'use strict'
 
-require('./setup/tap')
-
-const Span = require('../src/opentracing/span')
-const { storage } = require('../../datadog-core')
+const Span = require('opentracing').Span
 const Config = require('../src/config')
 const tags = require('../../../ext/tags')
-const { expect } = require('chai')
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
 
 const SPAN_TYPE = tags.SPAN_TYPE
 const RESOURCE_NAME = tags.RESOURCE_NAME
 const SERVICE_NAME = tags.SERVICE_NAME
+const ANALYTICS = tags.ANALYTICS
+
+wrapIt()
 
 describe('Tracer', () => {
   let Tracer
@@ -73,6 +71,12 @@ describe('Tracer', () => {
       })
     })
 
+    it('should support analytics', () => {
+      tracer.trace('name', { analytics: 0.5 }, span => {
+        expect(span.context()._tags).to.have.property(ANALYTICS, 0.5)
+      })
+    })
+
     it('should activate the span', () => {
       tracer.trace('name', {}, span => {
         expect(tracer.scope().active()).to.equal(span)
@@ -131,9 +135,9 @@ describe('Tracer', () => {
       } catch (e) {
         expect(span.finish).to.have.been.called
         expect(tags).to.include({
-          [ERROR_TYPE]: e.name,
-          [ERROR_MESSAGE]: e.message,
-          [ERROR_STACK]: e.stack
+          'error.type': e.name,
+          'error.msg': e.message,
+          'error.stack': e.stack
         })
       }
     })
@@ -173,9 +177,9 @@ describe('Tracer', () => {
 
         expect(span.finish).to.have.been.called
         expect(tags).to.include({
-          [ERROR_TYPE]: error.name,
-          [ERROR_MESSAGE]: error.message,
-          [ERROR_STACK]: error.stack
+          'error.type': error.name,
+          'error.msg': error.message,
+          'error.stack': error.stack
         })
       })
     })
@@ -220,27 +224,13 @@ describe('Tracer', () => {
           .catch(e => {
             expect(span.finish).to.have.been.called
             expect(tags).to.include({
-              [ERROR_TYPE]: e.name,
-              [ERROR_MESSAGE]: e.message,
-              [ERROR_STACK]: e.stack
+              'error.type': e.name,
+              'error.msg': e.message,
+              'error.stack': e.stack
             })
             done()
           })
           .catch(done)
-      })
-
-      it.skip('should not treat rejections as handled', done => {
-        const err = new Error('boom')
-
-        tracer
-          .trace('name', {}, () => {
-            return Promise.reject(err)
-          })
-
-        process.once('unhandledRejection', (received) => {
-          expect(received).to.equal(err)
-          done()
-        })
       })
     })
 
@@ -429,18 +419,6 @@ describe('Tracer', () => {
       expect(tracer.trace).to.have.been.calledWith('name', {
         tags: { sometag: 'somevalue', invocations: 2 }
       })
-    })
-
-    it('should not trace in a noop context', () => {
-      const fn = tracer.wrap('name', {}, () => {})
-
-      sinon.spy(tracer, 'trace')
-
-      storage.enterWith({ noop: true })
-      fn()
-      storage.enterWith(null)
-
-      expect(tracer.trace).to.have.not.been.called
     })
 
     describe('when there is no parent span', () => {

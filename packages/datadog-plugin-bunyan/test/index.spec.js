@@ -2,6 +2,9 @@
 
 const Writable = require('stream').Writable
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   let logger
@@ -9,7 +12,7 @@ describe('Plugin', () => {
   let stream
   let span
 
-  function setupTest (version) {
+  function setup (version) {
     const bunyan = require(`../../../versions/bunyan@${version}`).get()
 
     span = tracer.startSpan('test')
@@ -23,22 +26,19 @@ describe('Plugin', () => {
   }
 
   describe('bunyan', () => {
-    withVersions('bunyan', 'bunyan', version => {
+    withVersions(plugin, 'bunyan', version => {
       beforeEach(() => {
         tracer = require('../../dd-trace')
+        return agent.load('bunyan')
       })
 
       afterEach(() => {
-        return agent.close({ ritmReset: false })
+        return agent.close()
       })
 
       describe('without configuration', () => {
         beforeEach(() => {
-          return agent.load('bunyan')
-        })
-
-        beforeEach(() => {
-          setupTest(version)
+          setup(version)
         })
 
         it('should not alter the default behavior', () => {
@@ -56,11 +56,8 @@ describe('Plugin', () => {
 
       describe('with configuration', () => {
         beforeEach(() => {
-          return agent.load('bunyan', { logInjection: true })
-        })
-
-        beforeEach(() => {
-          setupTest(version)
+          tracer._tracer._logInjection = true
+          setup(version)
         })
 
         it('should add the trace identifiers to logger instances', () => {
@@ -87,18 +84,6 @@ describe('Plugin', () => {
             expect(stream.write).to.have.been.called
             expect(record).to.not.have.property('dd')
           })
-        })
-
-        it('should not inject trace_id or span_id without an active span', () => {
-          logger.info('message')
-
-          expect(stream.write).to.have.been.called
-
-          const record = JSON.parse(stream.write.firstCall.args[0].toString())
-
-          expect(record).to.have.property('dd')
-          expect(record.dd).to.not.have.property('trace_id')
-          expect(record.dd).to.not.have.property('span_id')
         })
       })
     })

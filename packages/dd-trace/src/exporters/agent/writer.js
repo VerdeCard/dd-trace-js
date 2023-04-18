@@ -1,31 +1,34 @@
 'use strict'
 
-const request = require('../common/request')
+const request = require('./request')
 const { startupLog } = require('../../startup-log')
 const metrics = require('../../metrics')
 const log = require('../../log')
-const tracerVersion = require('../../../../../package.json').version
-const BaseWriter = require('../common/writer')
+const tracerVersion = require('../../../lib/version')
 
 const METRIC_PREFIX = 'datadog.tracer.node.exporter.agent'
 
-class Writer extends BaseWriter {
-  constructor ({ prioritySampler, lookup, protocolVersion, headers }) {
-    super(...arguments)
+class Writer {
+  constructor ({ url, prioritySampler, lookup, protocolVersion }) {
     const AgentEncoder = getEncoder(protocolVersion)
 
+    this._url = url
     this._prioritySampler = prioritySampler
     this._lookup = lookup
     this._protocolVersion = protocolVersion
-    this._encoder = new AgentEncoder(this)
-    this._headers = headers
+    this._encoderForVersion = new AgentEncoder(this)
+  }
+
+  append (spans) {
+    log.debug(() => `Encoding trace: ${JSON.stringify(spans)}`)
+
+    this._encode(spans)
   }
 
   _sendPayload (data, count, done) {
     metrics.increment(`${METRIC_PREFIX}.requests`, true)
 
-    const { _headers, _lookup, _protocolVersion, _url } = this
-    makeRequest(_protocolVersion, data, count, _url, _headers, _lookup, true, (err, res, status) => {
+    makeRequest(this._protocolVersion, data, count, this._url, this._lookup, true, (err, res, status) => {
       if (status) {
         metrics.increment(`${METRIC_PREFIX}.responses`, true)
         metrics.increment(`${METRIC_PREFIX}.responses.by.status`, `status:${status}`, true)
@@ -59,6 +62,26 @@ class Writer extends BaseWriter {
       done()
     })
   }
+
+  setUrl (url) {
+    this._url = url
+  }
+
+  _encode (trace) {
+    this._encoderForVersion.encode(trace)
+  }
+
+  flush (done = () => {}) {
+    const count = this._encoderForVersion.count()
+
+    if (count > 0) {
+      const payload = this._encoderForVersion.makePayload()
+
+      this._sendPayload(payload, count, done)
+    } else {
+      done()
+    }
+  }
 }
 
 function setHeader (headers, key, value) {
@@ -75,27 +98,33 @@ function getEncoder (protocolVersion) {
   }
 }
 
-function makeRequest (version, data, count, url, headers, lookup, needsStartupLog, cb) {
+function makeRequest (version, data, count, url, lookup, needsStartupLog, cb) {
   const options = {
     path: `/v${version}/traces`,
     method: 'PUT',
     headers: {
-      ...headers,
       'Content-Type': 'application/msgpack',
       'Datadog-Meta-Tracer-Version': tracerVersion,
       'X-Datadog-Trace-Count': String(count)
     },
-    lookup,
-    url
+    lookup
   }
 
   setHeader(options.headers, 'Datadog-Meta-Lang', 'nodejs')
   setHeader(options.headers, 'Datadog-Meta-Lang-Version', process.version)
   setHeader(options.headers, 'Datadog-Meta-Lang-Interpreter', process.jsEngine || 'v8')
 
+  if (url.protocol === 'unix:') {
+    options.socketPath = url.pathname
+  } else {
+    options.protocol = url.protocol
+    options.hostname = url.hostname
+    options.port = url.port
+  }
+
   log.debug(() => `Request to the agent: ${JSON.stringify(options)}`)
 
-  request(data, options, (err, res, status) => {
+  request(Object.assign({ data }, options), (err, res, status) => {
     if (needsStartupLog) {
       // Note that logging will only happen once, regardless of how many times this is called.
       startupLog({

@@ -2,50 +2,46 @@
 
 const JSZip = require('jszip')
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
 const { setup } = require('./spec_helpers')
 
 const zip = new JSZip()
 
 const createClientContext = data => Buffer.from(JSON.stringify(data)).toString('base64')
 
+wrapIt()
+
 describe('Plugin', () => {
   describe('aws-sdk (lambda)', function () {
     setup()
 
-    withVersions('aws-sdk', ['aws-sdk', '@aws-sdk/smithy-client'], (version, moduleName) => {
+    withVersions(plugin, 'aws-sdk', version => {
       let AWS
       let lambda
       let tracer
 
-      const lambdaClientName = moduleName === '@aws-sdk/smithy-client' ? '@aws-sdk/client-lambda' : 'aws-sdk'
-
-      const parsePayload = payload => {
-        if (typeof payload !== 'string') {
-          payload = Buffer.from(payload).toString()
-        }
-        return JSON.parse(payload)
-      }
-
-      describe('with the new trace context propagation', () => {
+      describe('without configuration', () => {
         let ZipFile
 
         before(async () => {
-          const lambdaFunctionCode = 'exports.handle = async function (event, context) {\n  return context \n}'
+          const lambdaFunctionCode = 'def handle(event, context):\n  return event\n'
 
-          zip.file('handler.js', lambdaFunctionCode.toString())
+          zip.file('handler.py', lambdaFunctionCode.toString())
           ZipFile = await zip.generateAsync({ type: 'nodebuffer' })
         })
 
         before(done => {
-          AWS = require(`../../../versions/${lambdaClientName}@${version}`).get()
+          AWS = require(`../../../versions/aws-sdk@${version}`).get()
 
-          lambda = new AWS.Lambda({ endpoint: 'http://127.0.0.1:4566', region: 'us-east-1' })
+          const lambdaEndpoint = new AWS.Endpoint('http://localhost:4566')
+          lambda = new AWS.Lambda({ endpoint: lambdaEndpoint, region: 'us-east-1' })
+
           lambda.createFunction({
             FunctionName: 'ironmaiden',
             Code: { ZipFile },
             Handler: 'handler.handle',
             Role: 'arn:aws:iam::123456:role/test',
-            Runtime: 'nodejs14.x'
+            Runtime: 'python3.7'
           }, (err, res) => {
             if (err) return done(err)
 
@@ -56,17 +52,15 @@ describe('Plugin', () => {
 
         after(done => {
           lambda.deleteFunction({ FunctionName: 'ironmaiden' }, err => {
-            agent.close({ ritmReset: false }).then(() => done(err), done)
+            agent.close().then(() => done(err), done)
           })
         })
 
         it('should propagate the tracing context with existing ClientContext and `custom` key', (done) => {
-          let receivedContext
-
           agent.use(traces => {
             const span = traces[0][0]
-            const clientContextSent = Buffer.from(receivedContext, 'base64').toString('utf-8')
-            const injectedTraceData = JSON.parse(clientContextSent).custom
+            const clientContextSent = Buffer.from(lambdaReq.params.ClientContext, 'base64').toString('utf-8')
+            const injectedTraceData = JSON.parse(clientContextSent).custom._datadog
             const spanContext = tracer.extract('text_map', injectedTraceData)
 
             expect(span.resource.startsWith('invoke')).to.equal(true)
@@ -77,23 +71,18 @@ describe('Plugin', () => {
             expect(spanContext.toSpanId()).to.equal(parentId)
           }).then(done, done)
 
-          lambda.invoke({
+          const lambdaReq = lambda.invoke({
             FunctionName: 'ironmaiden',
             Payload: '{}',
             ClientContext: createClientContext({ custom: { megadeth: 'tornado of souls' } })
-          }, (e, data) => {
-            receivedContext = parsePayload(data.Payload).client_context
-            e && done(e)
-          })
+          }, e => e && done(e))
         })
 
         it('should propagate the tracing context with existing ClientContext and no `custom` key', (done) => {
-          let receivedContext
-
           agent.use(traces => {
             const span = traces[0][0]
-            const clientContextSent = Buffer.from(receivedContext, 'base64').toString('utf-8')
-            const injectedTraceData = JSON.parse(clientContextSent).custom
+            const clientContextSent = Buffer.from(lambdaReq.params.ClientContext, 'base64').toString('utf-8')
+            const injectedTraceData = JSON.parse(clientContextSent).custom._datadog
             const spanContext = tracer.extract('text_map', injectedTraceData)
 
             expect(span.resource.startsWith('invoke')).to.equal(true)
@@ -104,23 +93,18 @@ describe('Plugin', () => {
             expect(spanContext.toSpanId()).to.equal(parentId)
           }).then(done, done)
 
-          lambda.invoke({
+          const lambdaReq = lambda.invoke({
             FunctionName: 'ironmaiden',
             Payload: '{}',
             ClientContext: createClientContext({ megadeth: 'tornado of souls' })
-          }, (e, data) => {
-            receivedContext = parsePayload(data.Payload).client_context
-            e && done(e)
-          })
+          }, e => e && done(e))
         })
 
         it('should propagate the tracing context without an existing ClientContext', (done) => {
-          let receivedContext
-
           agent.use(traces => {
             const span = traces[0][0]
-            const clientContextSent = Buffer.from(receivedContext, 'base64').toString('utf-8')
-            const injectedTraceData = JSON.parse(clientContextSent).custom
+            const clientContextSent = Buffer.from(lambdaReq.params.ClientContext, 'base64').toString('utf-8')
+            const injectedTraceData = JSON.parse(clientContextSent).custom._datadog
             const spanContext = tracer.extract('text_map', injectedTraceData)
 
             expect(span.resource.startsWith('invoke')).to.equal(true)
@@ -131,13 +115,10 @@ describe('Plugin', () => {
             expect(spanContext.toSpanId()).to.equal(parentId)
           }).then(done, done)
 
-          lambda.invoke({
+          const lambdaReq = lambda.invoke({
             FunctionName: 'ironmaiden',
             Payload: '{}'
-          }, (e, data) => {
-            receivedContext = parsePayload(data.Payload).client_context
-            e && done(e)
-          })
+          }, e => e && done(e))
         })
       })
     })

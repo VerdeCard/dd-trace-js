@@ -1,10 +1,8 @@
 {
   "name": "plugin-bluebird",
   "run": "node index.js",
-  "run_with_affinity": "bash -c \"taskset -c $CPU_AFFINITY node index.js\"",
-  "cachegrind": false,
-  "iterations": 250,
-  "instructions": true,
+  "cachegrind": true,
+  "iterations": 10,
   "variants": {
     "control": {
       "env": {

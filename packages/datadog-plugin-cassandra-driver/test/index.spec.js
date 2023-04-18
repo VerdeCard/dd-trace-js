@@ -2,14 +2,16 @@
 
 const semver = require('semver')
 const agent = require('../../dd-trace/test/plugins/agent')
-const { ERROR_TYPE, ERROR_MESSAGE, ERROR_STACK } = require('../../dd-trace/src/constants')
+const plugin = require('../src')
+
+wrapIt()
 
 describe('Plugin', () => {
   let cassandra
   let tracer
 
   describe('cassandra-driver', () => {
-    withVersions('cassandra-driver', 'cassandra-driver', version => {
+    withVersions(plugin, 'cassandra-driver', version => {
       beforeEach(() => {
         tracer = require('../../dd-trace')
         global.tracer = tracer
@@ -23,7 +25,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(done => {
@@ -44,6 +46,7 @@ describe('Plugin', () => {
 
         it('should do automatic instrumentation', done => {
           const query = 'SELECT now() FROM local;'
+
           agent
             .use(traces => {
               expect(traces[0][0]).to.have.property('service', 'test-cassandra')
@@ -52,10 +55,9 @@ describe('Plugin', () => {
               expect(traces[0][0].meta).to.have.property('db.type', 'cassandra')
               expect(traces[0][0].meta).to.have.property('span.kind', 'client')
               expect(traces[0][0].meta).to.have.property('out.host', '127.0.0.1')
+              expect(traces[0][0].meta).to.have.property('out.port', '9042')
               expect(traces[0][0].meta).to.have.property('cassandra.query', query)
               expect(traces[0][0].meta).to.have.property('cassandra.keyspace', 'system')
-              expect(traces[0][0].meta).to.have.property('component', 'cassandra-driver')
-              expect(traces[0][0].meta).to.have.property('network.destination.port', '9042')
             })
             .then(done)
             .catch(done)
@@ -106,10 +108,9 @@ describe('Plugin', () => {
 
           agent
             .use(traces => {
-              expect(traces[0][0].meta).to.have.property(ERROR_TYPE, error.name)
-              expect(traces[0][0].meta).to.have.property(ERROR_MESSAGE, error.message)
-              expect(traces[0][0].meta).to.have.property(ERROR_STACK, error.stack)
-              expect(traces[0][0].meta).to.have.property('component', 'cassandra-driver')
+              expect(traces[0][0].meta).to.have.property('error.type', error.name)
+              expect(traces[0][0].meta).to.have.property('error.msg', error.message)
+              expect(traces[0][0].meta).to.have.property('error.stack', error.stack)
             })
             .then(done)
             .catch(done)
@@ -120,6 +121,8 @@ describe('Plugin', () => {
         })
 
         it('should run the callback in the parent context', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const scope = tracer.scope()
           const childOf = tracer.startSpan('test')
 
@@ -132,12 +135,29 @@ describe('Plugin', () => {
         })
 
         it('should run the batch callback in the parent context', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const scope = tracer.scope()
           const childOf = tracer.startSpan('test')
 
           scope.activate(childOf, () => {
             client.batch([`UPDATE test.test SET test='test' WHERE id='1234';`], () => {
               expect(tracer.scope().active()).to.equal(childOf)
+              done()
+            })
+          })
+        })
+
+        it('should run event listeners in the correct scope', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
+          const emitter = client.stream('SELECT now() FROM local;')
+          const span = tracer.startSpan('test')
+          const scope = tracer.scope()
+
+          scope.activate(span, () => {
+            emitter.once('readable', () => {
+              expect(scope.active()).to.equal(span)
               done()
             })
           })
@@ -152,7 +172,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(done => {
@@ -193,7 +213,7 @@ describe('Plugin', () => {
           })
 
           after(() => {
-            return agent.close({ ritmReset: false })
+            return agent.close()
           })
 
           beforeEach(done => {
@@ -225,10 +245,9 @@ describe('Plugin', () => {
                 expect(traces[0][0].meta).to.have.property('db.type', 'cassandra')
                 expect(traces[0][0].meta).to.have.property('span.kind', 'client')
                 expect(traces[0][0].meta).to.have.property('out.host', '127.0.0.1')
+                expect(traces[0][0].meta).to.have.property('out.port', '9042')
                 expect(traces[0][0].meta).to.have.property('cassandra.query', query)
                 expect(traces[0][0].meta).to.have.property('cassandra.keyspace', 'system')
-                expect(traces[0][0].meta).to.have.property('component', 'cassandra-driver')
-                expect(traces[0][0].meta).to.have.property('network.destination.port', '9042')
               })
               .then(done)
               .catch(done)

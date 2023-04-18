@@ -1,205 +1,273 @@
-const CiPlugin = require('../../dd-trace/src/plugins/ci_plugin')
-const { storage } = require('../../datadog-core')
+const { promisify } = require('util')
 
-const {
-  TEST_STATUS,
-  JEST_TEST_RUNNER,
-  finishAllTraceSpans,
-  getTestSuiteCommonTags,
-  addIntelligentTestRunnerSpanTags,
-  TEST_PARAMETERS,
-  TEST_COMMAND,
-  TEST_FRAMEWORK_VERSION
-} = require('../../dd-trace/src/plugins/util/test')
-const { COMPONENT } = require('../../dd-trace/src/constants')
 const id = require('../../dd-trace/src/id')
+const { SAMPLING_RULE_DECISION } = require('../../dd-trace/src/constants')
+const { SAMPLING_PRIORITY, SPAN_TYPE, RESOURCE_NAME } = require('../../../ext/tags')
+const { AUTO_KEEP } = require('../../../ext/priority')
+const {
+  TEST_TYPE,
+  TEST_NAME,
+  TEST_SUITE,
+  TEST_STATUS,
+  ERROR_MESSAGE,
+  ERROR_TYPE,
+  TEST_PARAMETERS,
+  CI_APP_ORIGIN,
+  getTestEnvironmentMetadata,
+  getTestParametersString,
+  finishAllTraceSpans
+} = require('../../dd-trace/src/plugins/util/test')
+const { getFormattedJestTestParameters } = require('./util')
 
-const isJestWorker = !!process.env.JEST_WORKER_ID
-
-// https://github.com/facebook/jest/blob/d6ad15b0f88a05816c2fe034dd6900d28315d570/packages/jest-worker/src/types.ts#L38
-const CHILD_MESSAGE_END = 2
-
-class JestPlugin extends CiPlugin {
-  static get id () {
-    return 'jest'
+function getVmContext (environment) {
+  if (typeof environment.getVmContext === 'function') {
+    return environment.getVmContext()
   }
+  return null
+}
 
-  constructor (...args) {
-    super(...args)
-
-    if (isJestWorker) {
-      // Used to handle the end of a jest worker to be able to flush
-      const handler = ([message]) => {
-        if (message === CHILD_MESSAGE_END) {
-          // testSuiteSpan is not defined for older versions of jest, where jest-jasmine2 is still used
-          if (this.testSuiteSpan) {
-            this.testSuiteSpan.finish()
-            finishAllTraceSpans(this.testSuiteSpan)
-          }
-          this.tracer._exporter.flush()
-          process.removeListener('message', handler)
-        }
-      }
-      process.on('message', handler)
+function wrapEnvironment (BaseEnvironment) {
+  return class DatadogJestEnvironment extends BaseEnvironment {
+    constructor (config, context) {
+      super(config, context)
+      this.testSuite = context.testPath.replace(`${config.rootDir}/`, '')
+      this.testSpansByTestName = {}
+      this.originalTestFnByTestName = {}
     }
-
-    this.addSub('ci:jest:session:finish', ({
-      status,
-      isSuitesSkipped,
-      isSuitesSkippingEnabled,
-      isCodeCoverageEnabled,
-      testCodeCoverageLinesTotal
-    }) => {
-      this.testSessionSpan.setTag(TEST_STATUS, status)
-      this.testModuleSpan.setTag(TEST_STATUS, status)
-
-      addIntelligentTestRunnerSpanTags(
-        this.testSessionSpan,
-        this.testModuleSpan,
-        { isSuitesSkipped, isSuitesSkippingEnabled, isCodeCoverageEnabled, testCodeCoverageLinesTotal }
-      )
-
-      this.testModuleSpan.finish()
-      this.testSessionSpan.finish()
-      finishAllTraceSpans(this.testSessionSpan)
-      this.tracer._exporter.flush()
-    })
-
-    // Test suites can be run in a different process from jest's main one.
-    // This subscriber changes the configuration objects from jest to inject the trace id
-    // of the test session to the processes that run the test suites.
-    this.addSub('ci:jest:session:configuration', configs => {
-      configs.forEach(config => {
-        config._ddTestSessionId = this.testSessionSpan.context().toTraceId()
-        config._ddTestModuleId = this.testModuleSpan.context().toSpanId()
-        config._ddTestCommand = this.testSessionSpan.context()._tags[TEST_COMMAND]
-      })
-    })
-
-    this.addSub('ci:jest:test-suite:start', ({ testSuite, testEnvironmentOptions, frameworkVersion }) => {
-      const {
-        _ddTestSessionId: testSessionId,
-        _ddTestCommand: testCommand,
-        _ddTestModuleId: testModuleId
-      } = testEnvironmentOptions
-
-      const testSessionSpanContext = this.tracer.extract('text_map', {
-        'x-datadog-trace-id': testSessionId,
-        'x-datadog-parent-id': testModuleId
-      })
-
-      const testSuiteMetadata = getTestSuiteCommonTags(testCommand, frameworkVersion, testSuite, 'jest')
-
-      this.testSuiteSpan = this.tracer.startSpan('jest.test_suite', {
-        childOf: testSessionSpanContext,
-        tags: {
-          [COMPONENT]: this.constructor.id,
-          ...this.testEnvironmentMetadata,
-          ...testSuiteMetadata
-        }
-      })
-    })
-
-    this.addSub('ci:jest:worker-report:trace', traces => {
-      const formattedTraces = JSON.parse(traces).map(trace =>
-        trace.map(span => ({
-          ...span,
-          span_id: id(span.span_id),
-          trace_id: id(span.trace_id),
-          parent_id: id(span.parent_id)
-        }))
-      )
-
-      formattedTraces.forEach(trace => {
-        this.tracer._exporter.export(trace)
-      })
-    })
-
-    this.addSub('ci:jest:worker-report:coverage', data => {
-      const formattedCoverages = JSON.parse(data).map(coverage => ({
-        traceId: id(coverage.traceId),
-        spanId: id(coverage.spanId),
-        files: coverage.files
-      }))
-      formattedCoverages.forEach(formattedCoverage => {
-        this.tracer._exporter.exportCoverage(formattedCoverage)
-      })
-    })
-
-    this.addSub('ci:jest:test-suite:finish', ({ status, errorMessage }) => {
-      this.testSuiteSpan.setTag(TEST_STATUS, status)
-      if (errorMessage) {
-        this.testSuiteSpan.setTag('error', new Error(errorMessage))
-      }
-      this.testSuiteSpan.finish()
-      // Suites potentially run in a different process than the session,
-      // so calling finishAllTraceSpans on the session span is not enough
-      finishAllTraceSpans(this.testSuiteSpan)
-      // Flushing within jest workers is cheap, as it's just interprocess communication
-      // We do not want to flush after every suite if jest is running tests serially,
-      // as every flush is an HTTP request.
-      if (isJestWorker) {
-        this.tracer._exporter.flush()
-      }
-    })
-
-    /**
-     * This can't use `this.itrConfig` like `ci:mocha:test-suite:code-coverage`
-     * because this subscription happens in a different process from the one
-     * fetching the ITR config.
-     */
-    this.addSub('ci:jest:test-suite:code-coverage', (coverageFiles) => {
-      const formattedCoverage = {
-        traceId: this.testSuiteSpan.context()._traceId,
-        spanId: this.testSuiteSpan.context()._spanId,
-        files: coverageFiles
-      }
-      this.tracer._exporter.exportCoverage(formattedCoverage)
-    })
-
-    this.addSub('ci:jest:test:start', (test) => {
-      const store = storage.getStore()
-      const span = this.startTestSpan(test)
-
-      this.enter(span, store)
-    })
-
-    this.addSub('ci:jest:test:finish', (status) => {
-      const span = storage.getStore().span
-      span.setTag(TEST_STATUS, status)
-      span.finish()
-      finishAllTraceSpans(span)
-    })
-
-    this.addSub('ci:jest:test:err', (error) => {
-      if (error) {
-        const store = storage.getStore()
-        if (store && store.span) {
-          const span = store.span
-          span.setTag(TEST_STATUS, 'fail')
-          span.setTag('error', error)
-        }
-      }
-    })
-
-    this.addSub('ci:jest:test:skip', (test) => {
-      const span = this.startTestSpan(test)
-      span.setTag(TEST_STATUS, 'skip')
-      span.finish()
-    })
-  }
-
-  startTestSpan (test) {
-    const { suite, name, runner, testParameters, frameworkVersion } = test
-
-    const extraTags = {
-      [JEST_TEST_RUNNER]: runner,
-      [TEST_PARAMETERS]: testParameters,
-      [TEST_FRAMEWORK_VERSION]: frameworkVersion
-    }
-
-    return super.startTestSpan(name, suite, this.testSuiteSpan, extraTags)
   }
 }
 
-module.exports = JestPlugin
+function createWrapTeardown (tracer, instrumenter) {
+  return function wrapTeardown (teardown) {
+    return async function teardownWithTrace () {
+      instrumenter.unwrap(this.global.test, 'each')
+      nameToParams = {}
+      await new Promise((resolve) => {
+        tracer._exporter._writer.flush(resolve)
+      })
+      return teardown.apply(this, arguments)
+    }
+  }
+}
+
+let nameToParams = {}
+
+const isTimeout = (event) => {
+  return event.error &&
+  typeof event.error === 'string' &&
+  event.error.startsWith('Exceeded timeout')
+}
+
+function createHandleTestEvent (tracer, testEnvironmentMetadata, instrumenter) {
+  return async function handleTestEventWithTrace (event) {
+    if (event.name === 'test_retry') {
+      let testName = event.test && event.test.name
+      const context = getVmContext(this)
+      if (context) {
+        const { currentTestName } = context.expect.getState()
+        testName = currentTestName
+      }
+      // If it's a retry, we restore the original test function so that it is not wrapped again
+      if (this.originalTestFnByTestName[testName]) {
+        event.test.fn = this.originalTestFnByTestName[testName]
+      }
+      return
+    }
+    if (event.name === 'test_fn_failure') {
+      if (!isTimeout(event)) {
+        return
+      }
+      const context = getVmContext(this)
+      if (context) {
+        const { currentTestName } = context.expect.getState()
+        const testSpan = this.testSpansByTestName[`${currentTestName}_${event.test.invocations}`]
+        if (testSpan) {
+          testSpan.setTag(ERROR_TYPE, 'Timeout')
+          testSpan.setTag(ERROR_MESSAGE, event.error)
+          testSpan.setTag(TEST_STATUS, 'fail')
+        }
+      }
+      return
+    }
+    if (event.name === 'setup') {
+      instrumenter.wrap(this.global.test, 'each', function (original) {
+        return function () {
+          const testParameters = getFormattedJestTestParameters(arguments)
+          const eachBind = original.apply(this, arguments)
+          return function () {
+            const [testName] = arguments
+            nameToParams[testName] = testParameters
+            return eachBind.apply(this, arguments)
+          }
+        }
+      })
+      return
+    }
+
+    if (event.name !== 'test_skip' &&
+      event.name !== 'test_todo' &&
+      event.name !== 'test_start' &&
+      event.name !== 'hook_failure') {
+      return
+    }
+    // for hook_failure events the test entry might not be defined, because the hook
+    // is not necessarily associated to a test:
+    if (!event.test) {
+      return
+    }
+
+    const childOf = tracer.extract('text_map', {
+      'x-datadog-trace-id': id().toString(10),
+      'x-datadog-parent-id': '0000000000000000',
+      'x-datadog-sampled': 1
+    })
+    let testName = event.test.name
+    const context = getVmContext(this)
+
+    if (context) {
+      const { currentTestName } = context.expect.getState()
+      testName = currentTestName
+    }
+
+    const commonSpanTags = {
+      [TEST_TYPE]: 'test',
+      [TEST_NAME]: testName,
+      [TEST_SUITE]: this.testSuite,
+      [SAMPLING_RULE_DECISION]: 1,
+      [SAMPLING_PRIORITY]: AUTO_KEEP,
+      ...testEnvironmentMetadata
+    }
+
+    const testParametersString = getTestParametersString(nameToParams, event.test.name)
+    if (testParametersString) {
+      commonSpanTags[TEST_PARAMETERS] = testParametersString
+    }
+
+    const resource = `${this.testSuite}.${testName}`
+    if (event.name === 'test_skip' || event.name === 'test_todo') {
+      const testSpan = tracer.startSpan(
+        'jest.test',
+        {
+          childOf,
+          tags: {
+            ...commonSpanTags,
+            [SPAN_TYPE]: 'test',
+            [RESOURCE_NAME]: resource,
+            [TEST_STATUS]: 'skip'
+          }
+        }
+      )
+      testSpan.context()._trace.origin = CI_APP_ORIGIN
+      testSpan.finish()
+      return
+    }
+    if (event.name === 'hook_failure') {
+      const testSpan = tracer.startSpan(
+        'jest.test',
+        {
+          childOf,
+          tags: {
+            ...commonSpanTags,
+            [SPAN_TYPE]: 'test',
+            [RESOURCE_NAME]: resource,
+            [TEST_STATUS]: 'fail'
+          }
+        }
+      )
+      testSpan.context()._trace.origin = CI_APP_ORIGIN
+      if (event.test.errors && event.test.errors.length) {
+        const error = new Error(event.test.errors[0][0])
+        error.stack = event.test.errors[0][1].stack
+        testSpan.setTag('error', error)
+      }
+      testSpan.finish()
+      return
+    }
+    // event.name === test_start at this point
+    const environment = this
+    environment.originalTestFnByTestName[testName] = event.test.fn
+
+    let specFunction = event.test.fn
+    if (specFunction.length) {
+      specFunction = promisify(specFunction)
+    }
+    event.test.fn = tracer.wrap(
+      'jest.test',
+      { type: 'test',
+        childOf,
+        resource,
+        tags: commonSpanTags
+      },
+      async () => {
+        let result
+        const testSpan = tracer.scope().active()
+        environment.testSpansByTestName[`${testName}_${event.test.invocations}`] = testSpan
+        testSpan.context()._trace.origin = CI_APP_ORIGIN
+        try {
+          result = await specFunction()
+          // it may have been set already if the test timed out
+          let suppressedErrors = []
+          const context = getVmContext(environment)
+          if (context) {
+            suppressedErrors = context.expect.getState().suppressedErrors
+          }
+          if (suppressedErrors && suppressedErrors.length) {
+            testSpan.setTag('error', suppressedErrors[0])
+            testSpan.setTag(TEST_STATUS, 'fail')
+          }
+          if (!testSpan._spanContext._tags[TEST_STATUS]) {
+            testSpan.setTag(TEST_STATUS, 'pass')
+          }
+        } catch (error) {
+          testSpan.setTag(TEST_STATUS, 'fail')
+          testSpan.setTag('error', error)
+          throw error
+        } finally {
+          finishAllTraceSpans(testSpan)
+        }
+        return result
+      }
+    )
+  }
+}
+
+module.exports = [
+  {
+    name: 'jest-environment-node',
+    versions: ['>=24.8.0'],
+    patch: function (NodeEnvironment, tracer) {
+      const testEnvironmentMetadata = getTestEnvironmentMetadata('jest')
+
+      this.wrap(NodeEnvironment.prototype, 'teardown', createWrapTeardown(tracer, this))
+
+      const newHandleTestEvent = createHandleTestEvent(tracer, testEnvironmentMetadata, this)
+      newHandleTestEvent._dd_original = NodeEnvironment.prototype.handleTestEvent
+      NodeEnvironment.prototype.handleTestEvent = newHandleTestEvent
+
+      return wrapEnvironment(NodeEnvironment)
+    },
+    unpatch: function (NodeEnvironment) {
+      this.unwrap(NodeEnvironment.prototype, 'teardown')
+      NodeEnvironment.prototype.handleTestEvent = NodeEnvironment.prototype.handleTestEvent._dd_original
+    }
+  },
+  {
+    name: 'jest-environment-jsdom',
+    versions: ['>=24.8.0'],
+    patch: function (JsdomEnvironment, tracer) {
+      const testEnvironmentMetadata = getTestEnvironmentMetadata('jest')
+
+      this.wrap(JsdomEnvironment.prototype, 'teardown', createWrapTeardown(tracer, this))
+
+      const newHandleTestEvent = createHandleTestEvent(tracer, testEnvironmentMetadata, this)
+      newHandleTestEvent._dd_original = JsdomEnvironment.prototype.handleTestEvent
+      JsdomEnvironment.prototype.handleTestEvent = newHandleTestEvent
+
+      return wrapEnvironment(JsdomEnvironment)
+    },
+    unpatch: function (JsdomEnvironment) {
+      this.unwrap(JsdomEnvironment.prototype, 'teardown')
+      JsdomEnvironment.prototype.handleTestEvent = JsdomEnvironment.prototype.handleTestEvent._dd_original
+    }
+  }
+]

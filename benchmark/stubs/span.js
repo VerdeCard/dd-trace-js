@@ -1,6 +1,9 @@
 'use strict'
 
+const constants = require('../../packages/dd-trace/src/constants')
 const id = require('../../packages/dd-trace/src/id')
+
+const SAMPLE_RATE_METRIC_KEY = constants.SAMPLE_RATE_METRIC_KEY
 
 const spanId = id('1234567812345678')
 
@@ -24,12 +27,14 @@ const span = {
       'resource.name': '/resource',
       'service.name': 'benchmark',
       'span.type': 'web',
-      error: true
+      error: true,
+      [SAMPLE_RATE_METRIC_KEY]: 1
     },
     _sampling: {},
+    _traceFlags: {},
     _name: 'operation'
   }),
-  _startTime: 1500000000000.123,
+  _startTime: 1500000000000.123456,
   _duration: 100,
   _spanContext: {
     _name: 'operation'

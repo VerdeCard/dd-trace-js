@@ -1,7 +1,5 @@
 'use strict'
 
-/* eslint-disable mocha/no-return-and-callback */
-
 require('../../dd-trace')
   .init({ plugins: false, sampleRate: 0 })
   .use('amqp10')

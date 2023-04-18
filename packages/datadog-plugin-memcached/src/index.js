@@ -1,26 +1,77 @@
 'use strict'
 
-const { CLIENT_PORT_KEY } = require('../../dd-trace/src/constants')
-const CachePlugin = require('../../dd-trace/src/plugins/cache')
+const analyticsSampler = require('../../dd-trace/src/analytics_sampler')
 
-class MemcachedPlugin extends CachePlugin {
-  static get id () { return 'memcached' }
+function createWrapCommand (tracer, config) {
+  return function wrapCommand (command) {
+    return function commandWithTrace (queryCompiler, server) {
+      const scope = tracer.scope()
+      const childOf = scope.active()
+      const span = tracer.startSpan('memcached.command', {
+        childOf,
+        tags: {
+          'span.kind': 'client',
+          'span.type': 'memcached',
+          'service.name': config.service || `${tracer._service}-memcached`
+        }
+      })
 
-  start ({ client, server, query }) {
-    const address = getAddress(client, server, query)
+      analyticsSampler.sample(span, config.analytics)
 
-    this.startSpan('memcached.command', {
-      service: this.config.service,
-      resource: query.type,
-      type: 'memcached',
-      kind: 'client',
-      meta: {
-        'memcached.command': query.command,
-        'out.host': address[0],
-        [CLIENT_PORT_KEY]: address[1]
-      }
+      queryCompiler = wrapQueryCompiler(queryCompiler, this, server, scope, span)
+
+      return scope.bind(command, span).call(this, queryCompiler, server)
+    }
+  }
+}
+
+function wrapQueryCompiler (original, client, server, scope, span) {
+  const parent = scope.active()
+
+  return function () {
+    const query = original.apply(this, arguments)
+    const callback = query.callback
+
+    span.addTags({
+      'resource.name': query.type,
+      'memcached.command': query.command
+    })
+
+    addHost(span, client, server, query)
+
+    query.callback = scope.bind(function (err) {
+      addError(span, err)
+
+      span.finish()
+
+      return callback.apply(this, arguments)
+    }, parent)
+
+    return query
+  }
+}
+
+function addHost (span, client, server, query) {
+  const address = getAddress(client, server, query)
+
+  if (address) {
+    span.addTags({
+      'out.host': address[0],
+      'out.port': address[1]
     })
   }
+}
+
+function addError (span, error) {
+  if (error) {
+    span.addTags({
+      'error.type': error.name,
+      'error.msg': error.message,
+      'error.stack': error.stack
+    })
+  }
+
+  return error
 }
 
 function getAddress (client, server, query) {
@@ -43,4 +94,13 @@ function getAddress (client, server, query) {
   return server && server.split(':')
 }
 
-module.exports = MemcachedPlugin
+module.exports = {
+  name: 'memcached',
+  versions: ['>=2.2'],
+  patch (Memcached, tracer, config) {
+    this.wrap(Memcached.prototype, 'command', createWrapCommand(tracer, config))
+  },
+  unpatch (Memcached) {
+    this.unwrap(Memcached.prototype, 'command')
+  }
+}

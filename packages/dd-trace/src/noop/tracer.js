@@ -1,11 +1,23 @@
 'use strict'
 
-const Scope = require('../noop/scope')
+const Tracer = require('opentracing').Tracer
+const Scope = require('../scope/base')
 const Span = require('./span')
 
-class NoopTracer {
+class NoopTracer extends Tracer {
   constructor (config) {
-    this._scope = new Scope()
+    super(config)
+
+    let ScopeManager
+
+    if (process.env.DD_CONTEXT_PROPAGATION === 'false') {
+      ScopeManager = require('../scope/noop/scope_manager')
+    } else {
+      ScopeManager = require('../scope/scope_manager')
+    }
+
+    this._scopeManager = new ScopeManager()
+    this._scope = new Scope(config)
     this._span = new Span(this)
   }
 
@@ -17,8 +29,16 @@ class NoopTracer {
     return fn
   }
 
+  scopeManager () {
+    return this._scopeManager
+  }
+
   scope () {
     return this._scope
+  }
+
+  currentSpan () {
+    return null
   }
 
   getRumData () {
@@ -28,18 +48,8 @@ class NoopTracer {
   setUrl () {
   }
 
-  startSpan (name, options) {
+  _startSpan (name, options) {
     return this._span
-  }
-
-  inject (spanContext, format, carrier) {}
-
-  extract (format, carrier) {
-    return this._span.context()
-  }
-
-  setUser () {
-    return this
   }
 }
 

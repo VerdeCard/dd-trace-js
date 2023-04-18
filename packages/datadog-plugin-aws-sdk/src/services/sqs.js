@@ -1,49 +1,9 @@
 'use strict'
 
 const log = require('../../../dd-trace/src/log')
-const BaseAwsSdkPlugin = require('../base')
-const { storage } = require('../../../datadog-core')
 
-class Sqs extends BaseAwsSdkPlugin {
-  static get id () { return 'sqs' }
-
-  constructor (...args) {
-    super(...args)
-    //
-    // TODO(bengl) Find a way to create the response span tags without this WeakMap being populated
-    // in the base class
-    this.requestTags = new WeakMap()
-
-    this.addSub('apm:aws:response:start:sqs', obj => {
-      const { request, response } = obj
-      const store = storage.getStore()
-      const plugin = this
-      const maybeChildOf = this.responseExtract(request.params, request.operation, response)
-      if (maybeChildOf) {
-        obj.needsFinish = true
-        const options = {
-          childOf: maybeChildOf,
-          tags: Object.assign(
-            {},
-            this.requestTags.get(request) || {},
-            { 'span.kind': 'server' }
-          )
-        }
-        const span = plugin.tracer.startSpan('aws.response', options)
-        this.enter(span, store)
-      }
-    })
-
-    this.addSub('apm:aws:response:finish:sqs', err => {
-      const { span } = storage.getStore()
-      this.finish(span, null, err)
-    })
-  }
-
-  isEnabled (request) {
-    // TODO(bengl) Figure out a way to make separate plugins for consumer and producer so that
-    // config can be isolated to `.configure()` instead of this whole isEnabled() thing.
-    const config = this.config
+class Sqs {
+  isEnabled (config, request) {
     switch (request.operation) {
       case 'receiveMessage':
         return config.consumer !== false
@@ -79,44 +39,29 @@ class Sqs extends BaseAwsSdkPlugin {
     return tags
   }
 
-  responseExtract (params, operation, response) {
-    if (operation !== 'receiveMessage') return
-    if (params.MaxNumberOfMessages && params.MaxNumberOfMessages !== 1) return
-    if (!response || !response.Messages || !response.Messages[0]) return
-
-    let message = response.Messages[0]
-
-    if (message.Body) {
-      try {
-        const body = JSON.parse(message.Body)
-
-        // SNS to SQS
-        if (body.Type === 'Notification') {
-          message = body
+  responseExtract (params, operation, response, tracer) {
+    if (operation === 'receiveMessage') {
+      if (
+        (!params.MaxNumberOfMessages || params.MaxNumberOfMessages === 1) &&
+        response &&
+        response.Messages &&
+        response.Messages[0] &&
+        response.Messages[0].MessageAttributes &&
+        response.Messages[0].MessageAttributes._datadog &&
+        response.Messages[0].MessageAttributes._datadog.StringValue
+      ) {
+        const textMap = response.Messages[0].MessageAttributes._datadog.StringValue
+        try {
+          return tracer.extract('text_map', JSON.parse(textMap))
+        } catch (err) {
+          log.error(err)
+          return undefined
         }
-      } catch (e) {
-        // SQS to SQS
       }
-    }
-
-    if (!message.MessageAttributes || !message.MessageAttributes._datadog) return
-
-    const datadogAttribute = message.MessageAttributes._datadog
-
-    try {
-      if (datadogAttribute.StringValue) {
-        const textMap = datadogAttribute.StringValue
-        return this.tracer.extract('text_map', JSON.parse(textMap))
-      } else if (datadogAttribute.Type === 'Binary') {
-        const buffer = Buffer.from(datadogAttribute.Value, 'base64')
-        return this.tracer.extract('text_map', JSON.parse(buffer))
-      }
-    } catch (e) {
-      log.error(e)
     }
   }
 
-  requestInject (span, request) {
+  requestInject (span, request, tracer) {
     const operation = request.operation
     if (operation === 'sendMessage') {
       if (!request.params) {
@@ -129,7 +74,7 @@ class Sqs extends BaseAwsSdkPlugin {
         return
       }
       const ddInfo = {}
-      this.tracer.inject(span, 'text_map', ddInfo)
+      tracer.inject(span, 'text_map', ddInfo)
       request.params.MessageAttributes._datadog = {
         DataType: 'String',
         StringValue: JSON.stringify(ddInfo)

@@ -1,20 +1,17 @@
 'use strict'
 
-require('./setup/tap')
-
 /* eslint-disable import/no-extraneous-dependencies */
 
 const proxyquire = require('proxyquire')
 const path = require('path')
+const shimmer = require('shimmer')
 const { expect } = require('chai')
-const ritm = require('../src/ritm')
 
 describe('Instrumenter', () => {
   let Instrumenter
   let instrumenter
   let integrations
   let tracer
-  let telemetry
 
   before(() => {
     process.env.DD_TRACE_DISABLED_PLUGINS = 'mocha'
@@ -64,10 +61,6 @@ describe('Instrumenter', () => {
       }
     }
 
-    telemetry = {
-      updateIntegrations: sinon.spy()
-    }
-
     Instrumenter = proxyquire('../src/instrumenter', {
       './plugins': {
         'http': integrations.http,
@@ -78,8 +71,7 @@ describe('Instrumenter', () => {
       '../../datadog-plugin-http/src': integrations.http,
       '../../datadog-plugin-express-mock/src': integrations.express,
       '../../datadog-plugin-mysql-mock/src': integrations.mysql,
-      '../../datadog-plugin-other/src': integrations.other,
-      './telemetry': telemetry
+      '../../datadog-plugin-other/src': integrations.other
     })
 
     instrumenter = new Instrumenter(tracer)
@@ -95,7 +87,6 @@ describe('Instrumenter', () => {
       .forEach(name => {
         delete require.cache[name]
       })
-    ritm.reset()
   })
 
   describe('with integrations enabled', () => {
@@ -112,7 +103,6 @@ describe('Instrumenter', () => {
 
         const express = require('express-mock')
 
-        expect(integrations.express.patch).to.have.been.calledOnce
         expect(integrations.express.patch).to.have.been.calledWith(express, 'tracer', config)
       })
 
@@ -122,7 +112,6 @@ describe('Instrumenter', () => {
 
         const express = require('express-mock')
 
-        expect(integrations.express.patch).to.have.been.calledOnce
         expect(integrations.express.patch).to.have.been.calledWithMatch(express, 'tracer', {})
       })
 
@@ -133,7 +122,7 @@ describe('Instrumenter', () => {
 
         require('express-mock')
 
-        expect(integrations.express.patch).to.have.been.calledOnce
+        expect(integrations.express.patch).to.have.been.called
       })
 
       it('should handle errors', () => {
@@ -147,11 +136,10 @@ describe('Instrumenter', () => {
 
         const express = require('express-mock')
 
-        expect(integrations.express.unpatch).to.have.been.calledOnce
         expect(integrations.express.unpatch).to.have.been.calledWith(express)
       })
 
-      it('should not patch using instrumentations with invalid files', () => {
+      it('should not patch modules with invalid files', () => {
         integrations.mysql[0].file = 'invalid.js'
 
         instrumenter.use('mysql-mock')
@@ -159,19 +147,19 @@ describe('Instrumenter', () => {
         require('mysql-mock')
 
         expect(integrations.mysql[0].patch).to.not.have.been.called
-        expect(integrations.mysql[1].patch).to.have.been.called
+        expect(integrations.mysql[1].patch).to.not.have.been.called
       })
 
       it('should handle errors when unpatching', () => {
         integrations.mysql[1].unpatch = sinon.stub().throws(new Error())
+        integrations.mysql[1].file = 'invalid.js'
 
         instrumenter.use('mysql-mock')
 
         require('mysql-mock')
 
-        instrumenter.unpatch(integrations.mysql[1])
-
-        expect(integrations.mysql[1].unpatch).to.have.been.called
+        expect(integrations.mysql[0].patch).to.not.have.been.called
+        expect(integrations.mysql[1].patch).to.not.have.been.called
       })
 
       it('should attempt to patch already loaded modules', () => {
@@ -179,7 +167,7 @@ describe('Instrumenter', () => {
 
         instrumenter.use('express-mock')
 
-        expect(integrations.express.patch).to.have.been.calledOnce
+        expect(integrations.express.patch).to.have.been.called
         expect(integrations.express.patch).to.have.been.calledWithMatch(express, 'tracer', {})
       })
 
@@ -198,7 +186,7 @@ describe('Instrumenter', () => {
 
         require('express-mock')
 
-        expect(integrations.express.patch).to.not.have.been.calledOnce
+        expect(integrations.express.patch).to.not.have.been.called
       })
 
       it('should not patch disabled plugins using shorthand', () => {
@@ -206,24 +194,18 @@ describe('Instrumenter', () => {
 
         require('express-mock')
 
-        expect(integrations.express.patch).to.not.have.been.calledOnce
+        expect(integrations.express.patch).to.not.have.been.called
       })
 
       it('should patch modules without declared entrypoint', () => {
         instrumenter.use('other', true)
         require('other')
 
-        expect(integrations.other.patch).to.have.been.calledOnce
+        expect(integrations.other.patch).to.have.been.called
       })
 
       it('should not interfere with userland modules masking core modules', () => {
         expect(require('http2/foo.js')).to.equal('Hello, World!')
-      })
-
-      it('should call updateIntegrations on telemetry', () => {
-        instrumenter.use('express-mock')
-
-        expect(telemetry.updateIntegrations).to.have.been.called
       })
     })
 
@@ -233,7 +215,6 @@ describe('Instrumenter', () => {
 
         const express = require('express-mock')
 
-        expect(integrations.express.patch).to.have.been.calledOnce
         expect(integrations.express.patch).to.have.been.calledWithMatch(express, 'tracer', {})
       })
 
@@ -251,7 +232,7 @@ describe('Instrumenter', () => {
 
         const http = require('http')
 
-        expect(integrations.http.patch).to.have.been.calledOnce
+        expect(integrations.http.patch).to.have.been.called
         expect(integrations.http.patch).to.have.been.calledWithMatch(http, 'tracer', {})
       })
 
@@ -265,8 +246,6 @@ describe('Instrumenter', () => {
 
         expect(mysql).to.deep.equal({ name: 'mysql' })
 
-        expect(integrations.mysql[0].patch).to.have.been.calledOnce
-        expect(integrations.mysql[1].patch).to.have.been.calledOnce
         expect(integrations.mysql[0].patch).to.have.been.calledWithMatch(Connection, 'tracer', {})
         expect(integrations.mysql[1].patch).to.have.been.calledWithMatch(Pool, 'tracer', {})
       })
@@ -283,7 +262,6 @@ describe('Instrumenter', () => {
 
         expect(mysql).to.deep.equal({ name: 'mysql' })
 
-        expect(integrations.mysql[0].patch).to.have.been.calledOnce
         expect(integrations.mysql[0].patch).to.have.been.calledWithMatch(Connection, 'tracer', {})
       })
 
@@ -304,7 +282,6 @@ describe('Instrumenter', () => {
 
         instrumenter.disable()
 
-        expect(integrations.express.unpatch).to.have.been.calledOnce
         expect(integrations.express.unpatch).to.have.been.calledWith(express, tracer)
       })
 
@@ -324,7 +301,6 @@ describe('Instrumenter', () => {
         require('mysql-mock')
 
         expect(() => instrumenter.disable()).to.not.throw()
-        expect(integrations.mysql[1].unpatch).to.have.been.calledOnce
         expect(integrations.mysql[1].unpatch).to.have.been.called
       })
     })
@@ -337,7 +313,7 @@ describe('Instrumenter', () => {
 
         instrumenter.wrap(obj, 'method', wrapper)
 
-        expect(wrapper).to.have.been.calledWith(method)
+        expect(wrapper).to.have.been.calledWith(method, 'method')
         expect(obj.method()).to.equal('test')
       })
 
@@ -353,18 +329,18 @@ describe('Instrumenter', () => {
         expect(obj.method).to.have.property(sym, 'bar')
       })
 
-      it('should override existing symbols on the shim', () => {
+      it('should not override existing symbols on the shim', () => {
         const sym = Symbol('foo')
         const obj = { method: () => {} }
         const shim = () => {}
         const wrapper = () => shim
 
-        shim[sym] = 'override'
+        shim[sym] = 'invalid'
         obj.method[sym] = 'bar'
 
         instrumenter.wrap(obj, 'method', wrapper)
 
-        expect(obj.method).to.have.property(sym, 'bar')
+        expect(obj.method).to.have.property(sym, 'invalid')
       })
 
       it('should throw if the method does not exist', () => {
@@ -396,6 +372,14 @@ describe('Instrumenter', () => {
         expect(shim).to.not.equal(fn)
         expect(shim()).to.equal('foobar')
       })
+
+      it('should leave non-functions untouched', () => {
+        const obj = {}
+        const wrapper = () => {}
+        const shim = instrumenter.wrapExport(obj, wrapper)
+
+        expect(shim).to.equal(obj)
+      })
     })
 
     describe('unwrapExport', () => {
@@ -404,9 +388,19 @@ describe('Instrumenter', () => {
         const wrapper = () => fn() + 'bar'
         const shim = instrumenter.wrapExport(fn, wrapper)
 
-        instrumenter.unwrapExport(shim)
+        instrumenter.unwrapExport(fn)
 
         expect(shim()).to.equal('foo')
+      })
+
+      it('should leave non-functions untouched', () => {
+        const obj = {}
+        const wrapper = () => {}
+        const shim = instrumenter.wrapExport(obj, wrapper)
+
+        instrumenter.unwrapExport(obj)
+
+        expect(shim).to.equal(obj)
       })
     })
   })
@@ -479,6 +473,7 @@ describe('Instrumenter', () => {
   describe('with plugins configured via DD_TRACE_<INTEGRATION>', () => {
     beforeEach(() => {
       Instrumenter = proxyquire('../src/instrumenter', {
+        'shimmer': shimmer,
         './plugins': {
           'mysql-mock': integrations.mysql
         },
@@ -488,6 +483,8 @@ describe('Instrumenter', () => {
 
     afterEach(() => {
       delete process.env.DD_TRACE_MYSQL_MOCK_ENABLED
+      delete process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_ENABLED
+      delete process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_SAMPLE_RATE
     })
 
     it('should use _ENABLED', () => {
@@ -498,6 +495,44 @@ describe('Instrumenter', () => {
       expect(plugins[0].name).to.equal('mysql-mock')
       expect(plugins[0].config.enabled).to.equal(false)
     })
+
+    it('should use _ANALYTICS_ENABLED', () => {
+      instrumenter = new Instrumenter(tracer)
+      process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_ENABLED = false
+      instrumenter.enable()
+      const plugins = [...instrumenter._plugins.values()]
+      expect(plugins[0].name).to.equal('mysql-mock')
+      expect(plugins[0].config.analytics).to.equal(false)
+    })
+
+    it('should use _ANALYTICS_SAMPLE_RATE when _ANALYTICS_ENABLED is true', () => {
+      instrumenter = new Instrumenter(tracer)
+      process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_ENABLED = true
+      process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_SAMPLE_RATE = '0.25'
+      instrumenter.enable()
+      const plugins = [...instrumenter._plugins.values()]
+      expect(plugins[0].name).to.equal('mysql-mock')
+      expect(plugins[0].config.analytics).to.equal(0.25)
+    })
+
+    it('should not use _ANALYTICS_SAMPLE_RATE when _ANALYTICS_ENABLED is false', () => {
+      instrumenter = new Instrumenter(tracer)
+      process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_ENABLED = false
+      process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_SAMPLE_RATE = '0.25'
+      instrumenter.enable()
+      const plugins = [...instrumenter._plugins.values()]
+      expect(plugins[0].name).to.equal('mysql-mock')
+      expect(plugins[0].config.analytics).to.equal(false)
+    })
+
+    it('should use _ANALYTICS_SAMPLE_RATE', () => {
+      instrumenter = new Instrumenter(tracer)
+      process.env.DD_TRACE_MYSQL_MOCK_ANALYTICS_SAMPLE_RATE = '0.25'
+      instrumenter.enable()
+      const plugins = [...instrumenter._plugins.values()]
+      expect(plugins[0].name).to.equal('mysql-mock')
+      expect(plugins[0].config.analytics).to.equal(0.25)
+    })
   })
 
   describe('with plugins disabled via DD_TRACE_DISABLED_PLUGINS environment variable', () => {
@@ -505,6 +540,7 @@ describe('Instrumenter', () => {
       process.env.DD_TRACE_DISABLED_PLUGINS = 'http,mysql-mock'
 
       Instrumenter = proxyquire('../src/instrumenter', {
+        'shimmer': shimmer,
         './plugins': {
           'http': integrations.http,
           'express-mock': integrations.express,

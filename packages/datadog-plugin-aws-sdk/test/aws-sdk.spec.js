@@ -1,9 +1,11 @@
 'use strict'
 
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
 const { setup, sort } = require('./spec_helpers')
 const semver = require('semver')
-const { ERROR_MESSAGE, ERROR_STACK, ERROR_TYPE } = require('../../dd-trace/src/constants')
+
+wrapIt()
 
 describe('Plugin', () => {
   // TODO: use the Request class directly for generic tests
@@ -11,28 +13,26 @@ describe('Plugin', () => {
   describe('aws-sdk', function () {
     setup()
 
-    withVersions('aws-sdk', ['aws-sdk', '@aws-sdk/smithy-client'], (version, moduleName) => {
+    withVersions(plugin, 'aws-sdk', version => {
       let AWS
       let s3
       let sqs
       let tracer
 
-      const s3ClientName = moduleName === '@aws-sdk/smithy-client' ? '@aws-sdk/client-s3' : 'aws-sdk'
-      const sqsClientName = moduleName === '@aws-sdk/smithy-client' ? '@aws-sdk/client-sqs' : 'aws-sdk'
-
       describe('without configuration', () => {
         before(() => {
-          return agent.load(['aws-sdk', 'http'], [{}, { server: false }])
-        })
+          AWS = require(`../../../versions/aws-sdk@${version}`).get()
 
-        before(() => {
-          AWS = require(`../../../versions/${s3ClientName}@${version}`).get()
-          s3 = new AWS.S3({ endpoint: 'http://127.0.0.1:4566', region: 'us-east-1', s3ForcePathStyle: true })
+          const endpoint = new AWS.Endpoint('http://localhost:4572')
+
+          s3 = new AWS.S3({ endpoint, s3ForcePathStyle: true })
           tracer = require('../../dd-trace')
+
+          return agent.load('aws-sdk')
         })
 
         after(() => {
-          return agent.close({ ritmReset: false, wipe: true })
+          return agent.close()
         })
 
         it('should instrument service methods with a callback', (done) => {
@@ -53,7 +53,7 @@ describe('Plugin', () => {
             })
           }).then(done, done)
 
-          s3.listBuckets({}, e => e && done(e))
+          s3.listBuckets(e => e && done(e))
         })
 
         it('should mark error responses', (done) => {
@@ -64,38 +64,23 @@ describe('Plugin', () => {
 
             expect(span).to.include({
               name: 'aws.request',
-              resource: 'completeMultipartUpload',
+              resource: 'listBuckets',
               service: 'test-aws-s3'
             })
 
             expect(span.meta).to.include({
-              [ERROR_TYPE]: error.name,
-              [ERROR_MESSAGE]: error.message,
-              [ERROR_STACK]: error.stack,
-              'component': 'aws-sdk'
+              'error.type': error.name,
+              'error.msg': error.message,
+              'error.stack': error.stack
             })
           }).then(done, done)
 
-          s3.completeMultipartUpload('invalid', e => {
+          s3.listBuckets({ 'BadParam': 'badvalue' }, e => {
             error = e
           })
         })
 
-        if (!semver.intersects(version, '<3')) {
-          it('should instrument service methods using promises', (done) => {
-            agent.use(traces => {
-              const span = sort(traces[0])[0]
-
-              expect(span).to.include({
-                name: 'aws.request',
-                resource: 'listBuckets',
-                service: 'test-aws-s3'
-              })
-            }).then(done, done)
-
-            s3.listBuckets({}).catch(done)
-          })
-        } else if (!semver.intersects(version, '<2.3.0')) {
+        if (semver.intersects(version, '>=2.3.0')) {
           it('should instrument service methods using promise()', (done) => {
             agent.use(traces => {
               const span = sort(traces[0])[0]
@@ -131,7 +116,7 @@ describe('Plugin', () => {
           const span = {}
 
           tracer.scope().activate(span, () => {
-            s3.listBuckets({}, () => {
+            s3.listBuckets(() => {
               try {
                 expect(tracer.scope().active()).to.equal(span)
                 done()
@@ -145,68 +130,63 @@ describe('Plugin', () => {
 
       describe('with configuration', () => {
         before(() => {
-          return agent.load(['aws-sdk', 'http'], [{
+          AWS = require(`../../../versions/aws-sdk@${version}`).get()
+
+          const endpoint = new AWS.Endpoint('http://localhost:4572')
+
+          s3 = new AWS.S3({ endpoint, s3ForcePathStyle: true })
+          tracer = require('../../dd-trace')
+
+          return agent.load('aws-sdk', {
             service: 'test',
             splitByAwsService: false,
             hooks: {
               request (span, response) {
                 span.setTag('hook.operation', response.request.operation)
-                span.addTags({
-                  'error': 0
-                })
               }
             }
-          }, { server: false }])
-        })
-
-        before(() => {
-          AWS = require(`../../../versions/${s3ClientName}@${version}`).get()
-          s3 = new AWS.S3({ endpoint: 'http://127.0.0.1:5000', region: 'us-east-1', s3ForcePathStyle: true })
-          tracer = require('../../dd-trace')
+          })
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         it('should be configured', (done) => {
           agent.use(traces => {
             const span = sort(traces[0])[0]
+
             expect(span).to.include({
               name: 'aws.request',
               resource: 'listBuckets',
               service: 'test'
             })
-            expect(span).to.have.property('error', 0)
+
             expect(span.meta).to.include({
-              'hook.operation': 'listBuckets',
-              'component': 'aws-sdk'
+              'hook.operation': 'listBuckets'
             })
           }).then(done, done)
 
-          s3.listBuckets({}, () => {})
+          s3.listBuckets(() => {})
         })
       })
 
       describe('with service configuration', () => {
         before(() => {
-          return agent.load(['aws-sdk', 'http'], [{
+          AWS = require(`../../../versions/aws-sdk@${version}`).get()
+
+          s3 = new AWS.S3({ endpoint: new AWS.Endpoint('http://localhost:4572'), s3ForcePathStyle: true })
+          sqs = new AWS.SQS({ endpoint: new AWS.Endpoint('http://localhost:4576') })
+          tracer = require('../../dd-trace')
+
+          return agent.load('aws-sdk', {
             service: 'test',
             s3: false
-          }, { server: false }])
-        })
-
-        before(() => {
-          const { S3 } = require(`../../../versions/${s3ClientName}@${version}`).get()
-          const { SQS } = require(`../../../versions/${sqsClientName}@${version}`).get()
-
-          s3 = new S3({ endpoint: 'http://127.0.0.1:4566', region: 'us-east-1', s3ForcePathStyle: true })
-          sqs = new SQS({ endpoint: 'http://127.0.0.1:4566', region: 'us-east-1' })
-          tracer = require('../../dd-trace')
+          })
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         it('should allow disabling a specific service', (done) => {
@@ -236,8 +216,8 @@ describe('Plugin', () => {
             total++
           }).catch((e) => {}, { timeoutMs: 100 })
 
-          s3.listBuckets({}, () => {})
-          sqs.listQueues({}, () => {})
+          s3.listBuckets(() => {})
+          sqs.listQueues(() => {})
 
           setTimeout(() => {
             try {

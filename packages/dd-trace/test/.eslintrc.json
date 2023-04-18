@@ -9,11 +9,11 @@
     "expect": true,
     "sinon": true,
     "proxyquire": true,
+    "wrapIt": true,
     "withVersions": true
   },
   "rules": {
     "no-unused-expressions": 0,
-    "handle-callback-err": 0,
-    "no-loss-of-precision": 0
+    "handle-callback-err": 0
   }
 }

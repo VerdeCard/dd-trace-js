@@ -2,8 +2,10 @@
 
 const agent = require('../../dd-trace/test/plugins/agent')
 const { expectSomeSpan, withDefaults } = require('../../dd-trace/test/plugins/helpers')
+const plugin = require('../src')
 const id = require('../../dd-trace/src/id')
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
+
+wrapIt()
 
 // The roundtrip to the pubsub emulator takes time. Sometimes a *long* time.
 const TIMEOUT = 30000
@@ -15,21 +17,19 @@ describe('Plugin', () => {
     this.timeout(TIMEOUT)
 
     before(() => {
-      process.env.PUBSUB_EMULATOR_HOST = 'localhost:8081'
+      process.env.PUBSUB_EMULATOR_HOST = 'localhost:8085'
     })
     after(() => {
       delete process.env.PUBSUB_EMULATOR_HOST
     })
     afterEach(() => {
-      return agent.close({ ritmReset: false })
+      return agent.close()
     })
-    withVersions('google-cloud-pubsub', '@google-cloud/pubsub', version => {
+    withVersions(plugin, '@google-cloud/pubsub', version => {
       let pubsub
       let project
       let topicName
       let resource
-      let v1
-      let gax
 
       describe('without configuration', () => {
         beforeEach(() => {
@@ -37,62 +37,40 @@ describe('Plugin', () => {
         })
         beforeEach(() => {
           tracer = require('../../dd-trace')
-          gax = require(`../../../versions/google-gax@3.5.7`).get()
-          const lib = require(`../../../versions/@google-cloud/pubsub@${version}`).get()
+          const { PubSub } = require(`../../../versions/@google-cloud/pubsub@${version}`).get()
           project = getProjectId()
           topicName = getTopic()
           resource = `projects/${project}/topics/${topicName}`
-          v1 = lib.v1
-          pubsub = new lib.PubSub({ projectId: project })
+          pubsub = new PubSub({ projectId: project })
         })
         describe('createTopic', () => {
           it('should be instrumented', async () => {
             const expectedSpanPromise = expectSpanWithDefaults({
               meta: {
                 'pubsub.method': 'createTopic',
-                'span.kind': 'client',
-                'component': 'google-cloud-pubsub'
+                'span.kind': 'client'
               }
             })
             await pubsub.createTopic(topicName)
             return expectedSpanPromise
           })
 
-          it('should be instrumented when using the internal API', async () => {
-            const publisher = new v1.PublisherClient({
-              grpc: gax.grpc,
-              projectId: project,
-              servicePath: 'localhost',
-              port: 8081,
-              sslCreds: gax.grpc.credentials.createInsecure()
-            }, gax)
-
-            const expectedSpanPromise = expectSpanWithDefaults({
-              meta: {
-                'pubsub.method': 'createTopic',
-                'span.kind': 'client',
-                'component': 'google-cloud-pubsub'
-              }
-            })
-            const name = `projects/${project}/topics/${topicName}`
-            const promise = publisher.createTopic({ name })
-            await promise
-
-            return expectedSpanPromise
-          })
-
           it('should be instrumented w/ error', async () => {
+            const error = new Error('bad')
             const expectedSpanPromise = expectSpanWithDefaults({
               error: 1,
               meta: {
                 'pubsub.method': 'createTopic',
-                'component': 'google-cloud-pubsub'
+                'error.msg': error.message,
+                'error.type': error.name,
+                'error.stack': error.stack
               }
             })
-            const publisher = new v1.PublisherClient({ projectId: project })
-            const name = `projects/${project}/topics/${topicName}`
+            pubsub.getClient_ = function (config, callback) {
+              callback(error)
+            }
             try {
-              await publisher.createTopic({ name })
+              await pubsub.createTopic(topicName)
             } catch (e) {
               // this is just to prevent mocha from crashing
             }
@@ -112,14 +90,35 @@ describe('Plugin', () => {
           it('should be instrumented', async () => {
             const expectedSpanPromise = expectSpanWithDefaults({
               meta: {
-                'pubsub.topic': resource,
                 'pubsub.method': 'publish',
-                'span.kind': 'producer',
-                'component': 'google-cloud-pubsub'
+                'span.kind': 'producer'
               }
             })
             const [topic] = await pubsub.createTopic(topicName)
             await publish(topic, { data: Buffer.from('hello') })
+            return expectedSpanPromise
+          })
+
+          it('should be instrumented w/ error', async () => {
+            const error = new Error('bad')
+            const expectedSpanPromise = expectSpanWithDefaults({
+              error: 1,
+              meta: {
+                'pubsub.method': 'publish',
+                'error.msg': error.message,
+                'error.type': error.name,
+                'error.stack': error.stack
+              }
+            })
+            const [topic] = await pubsub.createTopic(topicName)
+            pubsub.getClient_ = function (config, callback) {
+              callback(error)
+            }
+            try {
+              await publish(topic, { data: Buffer.from('hello') })
+            } catch (e) {
+              // this is just to prevent mocha from crashing
+            }
             return expectedSpanPromise
           })
 
@@ -141,9 +140,7 @@ describe('Plugin', () => {
               name: 'pubsub.receive',
               type: 'worker',
               meta: {
-                'component': 'google-cloud-pubsub',
-                'span.kind': 'consumer',
-                'pubsub.topic': resource
+                'span.kind': 'consumer'
               },
               metrics: {
                 'pubsub.ack': 1
@@ -186,10 +183,9 @@ describe('Plugin', () => {
               name: 'pubsub.receive',
               error: 1,
               meta: {
-                [ERROR_MESSAGE]: error.message,
-                [ERROR_TYPE]: error.name,
-                [ERROR_STACK]: error.stack,
-                'component': 'google-cloud-pubsub'
+                'error.msg': error.message,
+                'error.type': error.name,
+                'error.stack': error.stack
               }
             })
             const [topic] = await pubsub.createTopic(topicName)
@@ -217,20 +213,6 @@ describe('Plugin', () => {
             })
             await publish(topic, { data: Buffer.from('hello') })
             return expectedSpanPromise
-          })
-        })
-
-        describe('when disabled', () => {
-          beforeEach(() => {
-            tracer.use('google-cloud-pubsub', false)
-          })
-
-          afterEach(() => {
-            tracer.use('google-cloud-pubsub', true)
-          })
-
-          it('should work normally', async () => {
-            await pubsub.createTopic(topicName)
           })
         })
       })
@@ -272,7 +254,8 @@ describe('Plugin', () => {
           service,
           error: 0,
           meta: {
-            'component': 'google-cloud-pubsub',
+            component: '@google-cloud/pubsub',
+            'pubsub.topic': resource,
             'gcloud.project_id': project
           }
         }, expected)

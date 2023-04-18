@@ -7,10 +7,11 @@ const path = require('path')
 const tags = require('../../../ext/tags')
 const key = fs.readFileSync(path.join(__dirname, './ssl/test.key'))
 const cert = fs.readFileSync(path.join(__dirname, './ssl/test.crt'))
-const { ERROR_MESSAGE, ERROR_TYPE, ERROR_STACK } = require('../../dd-trace/src/constants')
 
 const HTTP_REQUEST_HEADERS = tags.HTTP_REQUEST_HEADERS
 const HTTP_RESPONSE_HEADERS = tags.HTTP_RESPONSE_HEADERS
+
+wrapIt()
 
 describe('Plugin', () => {
   let http2
@@ -41,12 +42,12 @@ describe('Plugin', () => {
         if (appListener) {
           appListener.close()
         }
-        return agent.close({ ritmReset: false })
+        return agent.close()
       })
 
       describe('without configuration', () => {
         beforeEach(() => {
-          return agent.load('http2', { server: false })
+          return agent.load('http2')
             .then(() => {
               http2 = require('http2')
             })
@@ -63,15 +64,13 @@ describe('Plugin', () => {
           getPort().then(port => {
             agent
               .use(traces => {
-                expect(traces[0][0]).to.have.property('service', 'test')
+                expect(traces[0][0]).to.have.property('service', 'test-http-client')
                 expect(traces[0][0]).to.have.property('type', 'http')
                 expect(traces[0][0]).to.have.property('resource', 'GET')
                 expect(traces[0][0].meta).to.have.property('span.kind', 'client')
                 expect(traces[0][0].meta).to.have.property('http.url', `${protocol}://localhost:${port}/user`)
                 expect(traces[0][0].meta).to.have.property('http.method', 'GET')
                 expect(traces[0][0].meta).to.have.property('http.status_code', '200')
-                expect(traces[0][0].meta).to.have.property('component', 'http2')
-                expect(traces[0][0].metrics).to.have.property('network.destination.port', port)
               })
               .then(done)
               .catch(done)
@@ -183,8 +182,7 @@ describe('Plugin', () => {
           })
         })
 
-        // TODO this breaks on node 12+ (maybe before?)
-        it.skip('should support a URL object and an options object, with the string URL taking precedence', done => {
+        it('should support a URL object and an options object, with the string URL taking precedence', done => {
           const app = (stream, headers) => {
             stream.respond({
               ':status': 200
@@ -230,8 +228,7 @@ describe('Plugin', () => {
           })
         })
 
-        // TODO this breaks on node 12+ (maybe before?)
-        it.skip('should support a string URL and an options object, with the string URL taking precedence', done => {
+        it('should support a string URL and an options object, with the string URL taking precedence', done => {
           const app = (stream, headers) => {
             stream.respond({
               ':status': 200
@@ -477,6 +474,8 @@ describe('Plugin', () => {
         })
 
         it('should run the callback in the parent context', done => {
+          if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
           const app = (stream, headers) => {
             stream.respond({
               ':status': 200
@@ -513,11 +512,9 @@ describe('Plugin', () => {
 
             agent
               .use(traces => {
-                expect(traces[0][0].meta).to.have.property(ERROR_TYPE, error.name)
-                expect(traces[0][0].meta).to.have.property(ERROR_MESSAGE, error.message)
-                expect(traces[0][0].meta).to.have.property(ERROR_STACK, error.stack)
-                expect(traces[0][0].meta).to.have.property('component', 'http2')
-                expect(traces[0][0].metrics).to.have.property('network.destination.port', port)
+                expect(traces[0][0].meta).to.have.property('error.type', error.name)
+                expect(traces[0][0].meta).to.have.property('error.msg', error.message)
+                expect(traces[0][0].meta).to.have.property('error.stack', error.stack)
               })
               .then(done)
               .catch(done)
@@ -805,53 +802,6 @@ describe('Plugin', () => {
                 expect(meta).to.have.property(`${HTTP_RESPONSE_HEADERS}.x-foo`, 'bar')
               })
               .then(done)
-              .catch(done)
-
-            appListener = server(app, port, () => {
-              const client = http2.connect(`${protocol}://localhost:${port}`)
-                .on('error', done)
-
-              client.request({ ':path': '/user' })
-                .on('error', done)
-                .end()
-            })
-          })
-        })
-      })
-
-      describe('with blocklist configuration', () => {
-        let config
-
-        beforeEach(() => {
-          config = {
-            server: false,
-            client: {
-              blocklist: [/\/user/]
-            }
-          }
-
-          return agent.load('http2', config)
-            .then(() => {
-              http2 = require('http2')
-            })
-        })
-
-        it('should skip recording if the url matches an item in the blocklist', done => {
-          const app = (stream, headers) => {
-            stream.respond({
-              ':status': 200
-            })
-            stream.end()
-          }
-
-          getPort().then(port => {
-            const timer = setTimeout(done, 100)
-
-            agent
-              .use(() => {
-                clearTimeout(timer)
-                done(new Error('Blocklisted requests should not be recorded.'))
-              })
               .catch(done)
 
             appListener = server(app, port, () => {

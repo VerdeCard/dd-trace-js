@@ -1,10 +1,6 @@
 'use strict'
 
-require('./setup/tap')
-
-const http = require('http')
-const path = require('path')
-const os = require('os')
+wrapIt()
 
 describe('dogstatsd', () => {
   let client
@@ -13,16 +9,8 @@ describe('dogstatsd', () => {
   let udp4
   let udp6
   let dns
-  let httpServer
-  let httpPort
-  let httpData
-  let httpUdsServer
-  let udsPath
-  let statusCode
-  let sockets
-  let assertData
 
-  beforeEach((done) => {
+  beforeEach(() => {
     udp6 = {
       send: sinon.spy(),
       on: sinon.stub().returns(udp6),
@@ -65,47 +53,6 @@ describe('dogstatsd', () => {
       'dgram': dgram,
       'dns': dns
     })
-
-    httpData = []
-    statusCode = 200
-    assertData = undefined
-    sockets = []
-    httpServer = http.createServer((req, res) => {
-      expect(req.url).to.equal('/dogstatsd/v2/proxy')
-      req.on('data', d => httpData.push(d))
-      req.on('end', () => {
-        res.statusCode = statusCode
-        res.end()
-        setTimeout(() => assertData && assertData(httpData))
-      })
-    }).listen(0, () => {
-      httpPort = httpServer.address().port
-      if (os.platform() === 'win32') {
-        done()
-        return
-      }
-      udsPath = path.join(os.tmpdir(), `test-dogstatsd-dd-trace-uds-${Math.random()}`)
-      httpUdsServer = http.createServer((req, res) => {
-        expect(req.url).to.equal('/dogstatsd/v2/proxy')
-        req.on('data', d => httpData.push(d))
-        req.on('end', () => {
-          res.end()
-          setTimeout(() => assertData && assertData(httpData))
-        })
-      }).listen(udsPath, () => {
-        done()
-      })
-      httpUdsServer.on('connection', socket => sockets.push(socket))
-    })
-    httpServer.on('connection', socket => sockets.push(socket))
-  })
-
-  afterEach(() => {
-    httpServer.close()
-    if (httpUdsServer) {
-      httpUdsServer.close()
-    }
-    sockets.forEach(socket => socket.destroy())
   })
 
   it('should send gauges', () => {
@@ -233,88 +180,5 @@ describe('dogstatsd', () => {
     expect(udp6.send.firstCall.args[2]).to.equal(37)
     expect(udp6.send.firstCall.args[3]).to.equal(7777)
     expect(udp6.send.firstCall.args[4]).to.equal('::1')
-  })
-
-  const udsIt = os.platform() === 'win32' ? it.skip : it
-  udsIt('should support HTTP via unix domain socket', (done) => {
-    assertData = () => {
-      try {
-        expect(Buffer.concat(httpData).toString()).to.equal('test.avg:0|g\ntest.avg2:2|g\n')
-        done()
-      } catch (e) {
-        done(e)
-      }
-    }
-
-    client = new Client({
-      metricsProxyUrl: `unix://${udsPath}`
-    })
-
-    client.gauge('test.avg', 0)
-    client.gauge('test.avg2', 2)
-    client.flush()
-  })
-
-  it('should support HTTP via port', (done) => {
-    assertData = () => {
-      try {
-        expect(Buffer.concat(httpData).toString()).to.equal('test.avg:1|g\ntest.avg2:2|g\n')
-        done()
-      } catch (e) {
-        done(e)
-      }
-    }
-
-    client = new Client({
-      metricsProxyUrl: `http://localhost:${httpPort}`
-    })
-
-    client.gauge('test.avg', 1)
-    client.gauge('test.avg2', 2)
-    client.flush()
-  })
-
-  it('should support HTTP via URL object', (done) => {
-    assertData = () => {
-      try {
-        expect(Buffer.concat(httpData).toString()).to.equal('test.avg:1|g\ntest.avg2:2|g\n')
-        done()
-      } catch (e) {
-        done(e)
-      }
-    }
-
-    client = new Client({
-      metricsProxyUrl: new URL(`http://localhost:${httpPort}`)
-    })
-
-    client.gauge('test.avg', 1)
-    client.gauge('test.avg2', 2)
-    client.flush()
-  })
-
-  it('should fail over to UDP', (done) => {
-    assertData = () => {
-      setTimeout(() => {
-        try {
-          expect(udp4.send).to.have.been.called
-          expect(udp4.send.firstCall.args[0].toString()).to.equal('test.count:10|c\n')
-          expect(udp4.send.firstCall.args[2]).to.equal(16)
-          done()
-        } catch (e) {
-          done(e)
-        }
-      })
-    }
-
-    statusCode = 404
-
-    client = new Client({
-      metricsProxyUrl: `http://localhost:${httpPort}`
-    })
-
-    client.increment('test.count', 10)
-
-    client.flush()
   })
 })

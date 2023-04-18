@@ -1,9 +1,10 @@
 'use strict'
 
+const semver = require('semver')
 const agent = require('../../dd-trace/test/plugins/agent')
 const { promisify } = require('util')
-const { storage } = require('../../datadog-core')
-const { ERROR_TYPE, ERROR_MESSAGE } = require('../../dd-trace/src/constants')
+
+wrapIt()
 
 describe('Plugin', () => {
   let dns
@@ -27,12 +28,10 @@ describe('Plugin', () => {
         .use(traces => {
           expect(traces[0][0]).to.deep.include({
             name: 'dns.lookup',
-            service: 'test',
+            service: 'test-dns',
             resource: 'localhost'
           })
           expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
             'dns.hostname': 'localhost',
             'dns.address': '127.0.0.1'
           })
@@ -43,64 +42,15 @@ describe('Plugin', () => {
       dns.lookup('localhost', 4, (err, address, family) => err && done(err))
     })
 
-    it('should instrument lookup with all addresses', done => {
-      agent
-        .use(traces => {
-          expect(traces[0][0]).to.deep.include({
-            name: 'dns.lookup',
-            service: 'test',
-            resource: 'localhost'
-          })
-          expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
-            'dns.hostname': 'localhost',
-            'dns.address': '127.0.0.1',
-            'dns.addresses': '127.0.0.1,::1'
-          })
-        })
-        .then(done)
-        .catch(done)
-
-      dns.lookup('localhost', { all: true }, (err, address, family) => err && done(err))
-    })
-
-    it('should instrument errors correctly', done => {
-      agent
-        .use(traces => {
-          expect(traces[0][0]).to.deep.include({
-            name: 'dns.lookup',
-            service: 'test',
-            resource: 'fakedomain.faketld',
-            error: 1
-          })
-          expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
-            'dns.hostname': 'fakedomain.faketld',
-            [ERROR_TYPE]: 'Error',
-            [ERROR_MESSAGE]: 'getaddrinfo ENOTFOUND fakedomain.faketld'
-          })
-        })
-        .then(done)
-        .catch(done)
-
-      dns.lookup('fakedomain.faketld', 4, (err, address, family) => {
-        expect(err).to.not.be.null
-      })
-    })
-
     it('should instrument lookupService', done => {
       agent
         .use(traces => {
           expect(traces[0][0]).to.deep.include({
             name: 'dns.lookup_service',
-            service: 'test',
+            service: 'test-dns',
             resource: '127.0.0.1:22'
           })
           expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
             'dns.address': '127.0.0.1'
           })
           expect(traces[0][0].metrics).to.deep.include({
@@ -118,20 +68,18 @@ describe('Plugin', () => {
         .use(traces => {
           expect(traces[0][0]).to.deep.include({
             name: 'dns.resolve',
-            service: 'test',
-            resource: 'A lvh.me'
+            service: 'test-dns',
+            resource: 'A localhost'
           })
           expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
-            'dns.hostname': 'lvh.me',
+            'dns.hostname': 'localhost',
             'dns.rrtype': 'A'
           })
         })
         .then(done)
         .catch(done)
 
-      dns.resolve('lvh.me', err => err && done(err))
+      dns.resolve('localhost', err => err && done(err))
     })
 
     it('should instrument resolve shorthands', done => {
@@ -139,20 +87,18 @@ describe('Plugin', () => {
         .use(traces => {
           expect(traces[0][0]).to.deep.include({
             name: 'dns.resolve',
-            service: 'test',
-            resource: 'ANY lvh.me'
+            service: 'test-dns',
+            resource: 'ANY localhost'
           })
           expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
-            'dns.hostname': 'lvh.me',
+            'dns.hostname': 'localhost',
             'dns.rrtype': 'ANY'
           })
         })
         .then(done)
         .catch(done)
 
-      dns.resolveAny('lvh.me', err => err && done(err))
+      dns.resolveAny('localhost', err => err && done(err))
     })
 
     it('should instrument reverse', done => {
@@ -160,12 +106,10 @@ describe('Plugin', () => {
         .use(traces => {
           expect(traces[0][0]).to.deep.include({
             name: 'dns.reverse',
-            service: 'test',
+            service: 'test-dns',
             resource: '127.0.0.1'
           })
           expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'span.kind': 'client',
             'dns.ip': '127.0.0.1'
           })
         })
@@ -176,7 +120,7 @@ describe('Plugin', () => {
     })
 
     it('should preserve the parent scope in the callback', done => {
-      const span = tracer.startSpan('dummySpan', {})
+      const span = {}
 
       tracer.scope().activate(span, () => {
         dns.lookup('localhost', 4, (err) => {
@@ -198,41 +142,27 @@ describe('Plugin', () => {
       })
     })
 
-    it('should instrument Resolver', done => {
-      const resolver = new dns.Resolver()
+    if (semver.gte(process.version, '8.3.0')) {
+      it('should instrument Resolver', done => {
+        const resolver = new dns.Resolver()
 
-      agent
-        .use(traces => {
-          expect(traces[0][0]).to.deep.include({
-            name: 'dns.resolve',
-            service: 'test',
-            resource: 'A lvh.me'
+        agent
+          .use(traces => {
+            expect(traces[0][0]).to.deep.include({
+              name: 'dns.resolve',
+              service: 'test-dns',
+              resource: 'A localhost'
+            })
+            expect(traces[0][0].meta).to.deep.include({
+              'dns.hostname': 'localhost',
+              'dns.rrtype': 'A'
+            })
           })
-          expect(traces[0][0].meta).to.deep.include({
-            'component': 'dns',
-            'dns.hostname': 'lvh.me',
-            'dns.rrtype': 'A'
-          })
-        })
-        .then(done)
-        .catch(done)
+          .then(done)
+          .catch(done)
 
-      resolver.resolve('lvh.me', err => err && done(err))
-    })
-
-    it('should skip instrumentation for noop context', done => {
-      const resolver = new dns.Resolver()
-      const timer = setTimeout(done, 200)
-
-      agent
-        .use(() => {
-          done(new Error('Resolve was traced.'))
-          clearTimeout(timer)
-        })
-
-      storage.run({ noop: true }, () => {
-        resolver.resolve('lvh.me', () => {})
+        resolver.resolve('localhost', err => err && done(err))
       })
-    })
+    }
   })
 })

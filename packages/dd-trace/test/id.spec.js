@@ -1,25 +1,18 @@
 'use strict'
 
-require('./setup/tap')
+wrapIt()
 
 describe('id', () => {
   let id
   let crypto
 
   beforeEach(() => {
+    const seeds = new Uint32Array(2)
+
+    seeds[0] = seeds[1] = 0xFF000000
+
     crypto = {
-      randomFillSync: data => {
-        for (let i = 0; i < data.length; i += 8) {
-          data[i] = 0xFF
-          data[i + 1] = 0x00
-          data[i + 2] = 0xFF
-          data[i + 3] = 0x00
-          data[i + 4] = 0xFF
-          data[i + 5] = 0x00
-          data[i + 6] = 0xFF
-          data[i + 7] = 0x00
-        }
-      }
+      randomBytes: sinon.stub().returns(Buffer.from(seeds.buffer))
     }
 
     sinon.stub(Math, 'random')
@@ -55,23 +48,10 @@ describe('id', () => {
     expect(json).to.equal('"7f00ff00ff00ff00"')
   })
 
-  it('should support small hex strings', () => {
-    const spanId = id('abcd', 16)
-
-    expect(spanId.toString()).to.equal('000000000000abcd')
-  })
-
-  it('should support large hex strings', () => {
-    const spanId = id('12293a8527e70a7f27c8d624ace0f559', 16)
-
-    expect(spanId.toString()).to.equal('12293a8527e70a7f27c8d624ace0f559')
-    expect(spanId.toString(10)).to.equal('2866776615828911449')
-  })
-
-  it('should use hex strings by default', () => {
+  it('should support hex strings', () => {
     const spanId = id('abcd')
 
-    expect(spanId.toString()).to.equal('000000000000abcd')
+    expect(spanId.toString()).to.equal('abcd')
   })
 
   it('should support number strings', () => {

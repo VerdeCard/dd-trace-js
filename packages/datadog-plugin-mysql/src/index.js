@@ -1,38 +1,107 @@
 'use strict'
 
-const CLIENT_PORT_KEY = require('../../dd-trace/src/constants')
-const DatabasePlugin = require('../../dd-trace/src/plugins/database')
+const Tags = require('opentracing').Tags
+const analyticsSampler = require('../../dd-trace/src/analytics_sampler')
 
-class MySQLPlugin extends DatabasePlugin {
-  static get id () { return 'mysql' }
-  static get system () { return 'mysql' }
+function createWrapQuery (tracer, config) {
+  return function wrapQuery (query) {
+    return function queryWithTrace (sql, values, cb) {
+      const scope = tracer.scope()
+      const childOf = scope.active()
+      const span = tracer.startSpan('mysql.query', {
+        childOf,
+        tags: {
+          [Tags.SPAN_KIND]: Tags.SPAN_KIND_RPC_CLIENT,
+          'service.name': config.service || `${tracer._service}-mysql`,
+          'span.type': 'sql',
+          'span.kind': 'client',
+          'db.type': 'mysql',
+          'db.user': this.config.user,
+          'out.host': this.config.host,
+          'out.port': this.config.port
+        }
+      })
 
-  start (payload) {
-    const service = getServiceName(this.config, payload.conf)
-
-    this.startSpan(`${this.system}.query`, {
-      service,
-      resource: payload.sql,
-      type: 'sql',
-      kind: 'client',
-      meta: {
-        'db.type': this.system,
-        'db.user': payload.conf.user,
-        'db.name': payload.conf.database,
-        'out.host': payload.conf.host,
-        [CLIENT_PORT_KEY]: payload.conf.port
+      if (this.config.database) {
+        span.setTag('db.name', this.config.database)
       }
-    })
-    payload.sql = this.injectDbmQuery(payload.sql, service)
+
+      analyticsSampler.sample(span, config.analytics)
+
+      const sequence = scope.bind(query, span).call(this, sql, values, cb)
+
+      scope.bind(sequence)
+
+      span.setTag('resource.name', sequence.sql)
+
+      if (sequence._callback) {
+        sequence._callback = wrapCallback(tracer, span, childOf, sequence._callback)
+      } else {
+        sequence.on('end', () => {
+          span.finish()
+        })
+      }
+
+      return sequence
+    }
   }
 }
 
-function getServiceName (config, dbConfig) {
-  if (typeof config.service === 'function') {
-    return config.service(dbConfig)
+function createWrapGetConnection (tracer, config) {
+  return function wrapGetConnection (getConnection) {
+    return function getConnectionWithTrace (cb) {
+      const scope = tracer.scope()
+      return scope.bind(getConnection).call(this, scope.bind(cb))
+    }
   }
-
-  return config.service
 }
 
-module.exports = MySQLPlugin
+function wrapCallback (tracer, span, parent, done) {
+  return tracer.scope().bind((...args) => {
+    const err = args[0]
+    if (err) {
+      span.addTags({
+        'error.type': err.name,
+        'error.msg': err.message,
+        'error.stack': err.stack
+      })
+    }
+
+    span.finish()
+
+    done(...args)
+  }, parent)
+}
+
+function patchConnection (Connection, tracer, config) {
+  this.wrap(Connection.prototype, 'query', createWrapQuery(tracer, config))
+}
+
+function unpatchConnection (Connection) {
+  this.unwrap(Connection.prototype, 'query')
+}
+
+function patchPool (Pool, tracer, config) {
+  this.wrap(Pool.prototype, 'getConnection', createWrapGetConnection(tracer, config))
+}
+
+function unpatchPool (Pool) {
+  this.unwrap(Pool.prototype, 'getConnection')
+}
+
+module.exports = [
+  {
+    name: 'mysql',
+    file: 'lib/Connection.js',
+    versions: ['>=2'],
+    patch: patchConnection,
+    unpatch: unpatchConnection
+  },
+  {
+    name: 'mysql',
+    file: 'lib/Pool.js',
+    versions: ['>=2'],
+    patch: patchPool,
+    unpatch: unpatchPool
+  }
+]

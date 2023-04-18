@@ -1,12 +1,11 @@
 'use strict'
 
 const semver = require('semver')
-const Hook = require('../../datadog-instrumentations/src/helpers/hook')
+const hook = require('./ritm')
 const parse = require('module-details-from-path')
 const path = require('path')
 const uniq = require('lodash.uniq')
 const log = require('./log')
-const requirePackageJson = require('./require-package-json')
 
 const pathSepExpr = new RegExp(`\\${path.sep}`, 'g')
 
@@ -17,7 +16,6 @@ class Loader {
 
   reload (plugins) {
     this._plugins = plugins
-    this._patched = []
 
     const instrumentations = Array.from(this._plugins.keys())
       .reduce((prev, current) => prev.concat(current), [])
@@ -28,10 +26,7 @@ class Loader {
     this._names = new Set(instrumentations
       .map(instrumentation => filename(instrumentation)))
 
-    this._hook && this._hook.unhook()
-    this._hook = Hook(instrumentedModules, (moduleExports, moduleName, moduleBaseDir) => {
-      return this._hookModule(moduleExports, moduleName, moduleBaseDir)
-    })
+    hook(instrumentedModules, this._hookModule.bind(this))
   }
 
   load (instrumentation, config) {
@@ -56,11 +51,11 @@ class Loader {
 
         const basedir = getBasedir(ids[i])
 
-        pkg = requirePackageJson(basedir, module)
+        pkg = require(`${basedir}/package.json`)
       } else {
         const basedir = getBasedir(ids[i])
 
-        pkg = requirePackageJson(basedir, module)
+        pkg = require(`${basedir}/package.json`)
 
         const mainFile = path.posix.normalize(pkg.main || 'index.js')
         if (!id.endsWith(`/node_modules/${instrumentation.name}/${mainFile}`)) continue
@@ -87,26 +82,51 @@ class Loader {
 
     const moduleVersion = getVersion(moduleBaseDir)
 
-    for (const [plugin, meta] of this._plugins) {
-      if (meta.config.enabled === false) {
-        continue
-      }
-      try {
-        for (const instrumentation of [].concat(plugin)) {
-          if (moduleName !== filename(instrumentation) || !matchVersion(moduleVersion, instrumentation.versions)) {
-            continue
-          }
+    Array.from(this._plugins.keys())
+      .filter(plugin => [].concat(plugin).some(instrumentation =>
+        filename(instrumentation) === moduleName && matchVersion(moduleVersion, instrumentation.versions)
+      ))
+      .forEach(plugin => this._validate(plugin, moduleName, moduleBaseDir, moduleVersion))
 
-          moduleExports = this._instrumenter.patch(instrumentation, moduleExports, meta.config) || moduleExports
+    this._plugins
+      .forEach((meta, plugin) => {
+        try {
+          [].concat(plugin)
+            .filter(instrumentation => moduleName === filename(instrumentation))
+            .filter(instrumentation => matchVersion(moduleVersion, instrumentation.versions))
+            .forEach(instrumentation => {
+              const config = this._plugins.get(plugin).config
+
+              if (config.enabled !== false) {
+                moduleExports = this._instrumenter.patch(instrumentation, moduleExports, config) || moduleExports
+              }
+            })
+        } catch (e) {
+          log.error(e)
+          this._instrumenter.unload(plugin)
+          log.debug(`Error while trying to patch ${meta.name}. The plugin has been disabled.`)
         }
-      } catch (e) {
-        log.error(e)
-        this._instrumenter.unload(plugin)
-        log.debug(`Error while trying to patch ${meta.name}. The plugin has been disabled.`)
-      }
-    }
+      })
 
     return moduleExports
+  }
+
+  _validate (plugin, moduleName, moduleBaseDir, moduleVersion) {
+    const meta = this._plugins.get(plugin)
+    const instrumentations = [].concat(plugin)
+
+    for (let i = 0; i < instrumentations.length; i++) {
+      if (moduleName.indexOf(instrumentations[i].name) !== 0) continue
+      if (instrumentations[i].versions && !matchVersion(moduleVersion, instrumentations[i].versions)) continue
+      if (instrumentations[i].file && !exists(moduleBaseDir, instrumentations[i].file)) {
+        this._instrumenter.unload(plugin)
+        log.debug([
+          `Plugin "${meta.name}" requires "${instrumentations[i].file}" which was not found.`,
+          `The plugin was disabled.`
+        ].join(' '))
+        break
+      }
+    }
   }
 }
 
@@ -120,12 +140,22 @@ function matchVersion (version, ranges) {
 
 function getVersion (moduleBaseDir) {
   if (moduleBaseDir) {
-    return requirePackageJson(moduleBaseDir, module).version
+    const packageJSON = `${moduleBaseDir}/package.json`
+    return require(packageJSON).version
   }
 }
 
 function filename (plugin) {
   return [plugin.name, plugin.file].filter(val => val).join('/')
+}
+
+function exists (basedir, file) {
+  try {
+    require.resolve(`${basedir}/${file}`)
+    return true
+  } catch (e) {
+    return false
+  }
 }
 
 module.exports = Loader

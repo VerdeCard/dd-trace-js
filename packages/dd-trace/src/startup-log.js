@@ -1,28 +1,52 @@
 'use strict'
 
-const { info, warn } = require('./log/writer')
-
+const mainLogger = require('./log')
+const path = require('path')
 const os = require('os')
 const { inspect } = require('util')
-const tracerVersion = require('../../../package.json').version
+const tracerVersion = require('../lib/version')
+
+const logger = Object.create(mainLogger)
+logger._enabled = true
 
 let config
-let pluginManager
+let instrumenter
 let samplingRules = []
+
 let alreadyRan = false
 
 function getIntegrationsAndAnalytics () {
   const integrations = new Set()
   const extras = {}
-  for (const pluginName in pluginManager._pluginsByName) {
-    integrations.add(pluginName)
+  for (const plugin of instrumenter._instrumented.keys()) {
+    if (plugin.versions) {
+      try {
+        const version = require(path.join(plugin.name, 'package.json')).version
+        integrations.add(`${plugin.name}@${version}`)
+      } catch (e) {
+        integrations.add(plugin.name)
+      }
+    } else {
+      integrations.add(plugin.name)
+    }
+
+    const pluginData = instrumenter._plugins.get(plugin.name)
+    if (pluginData) {
+      const pluginConfig = pluginData.config
+      if (pluginConfig && pluginConfig.analytics) {
+        extras[`integration_${plugin.name}_analytics_enabled`] = true
+        if (typeof pluginConfig.analytics !== 'boolean') {
+          extras[`integration_${plugin.name}_sample_rate`] = pluginConfig.analytics
+        }
+      }
+    }
   }
   extras.integrations_loaded = Array.from(integrations)
   return extras
 }
 
 function startupLog ({ agentError } = {}) {
-  if (!config || !pluginManager) {
+  if (!config || !instrumenter) {
     return
   }
 
@@ -56,12 +80,14 @@ function startupLog ({ agentError } = {}) {
   out.lang_version = process.versions.node
   out.env = config.env
   out.enabled = config.enabled
+  out.scope_manager = config.scope
   out.service = config.service
   out.agent_url = url
   if (agentError) {
     out.agent_error = agentError.message
   }
   out.debug = !!config.debug
+  out.analytics_enabled = !!config.analytics
   out.sample_rate = config.sampleRate
   out.sampling_rules = samplingRules
   out.tags = config.tags
@@ -71,10 +97,7 @@ function startupLog ({ agentError } = {}) {
 
   out.log_injection_enabled = !!config.logInjection
   out.runtime_metrics_enabled = !!config.runtimeMetrics
-  out.profiling_enabled = !!(config.profiling || {}).enabled
   Object.assign(out, getIntegrationsAndAnalytics())
-
-  out.appsec_enabled = !!config.appsec.enabled
 
   // // This next bunch is for features supported by other tracers, but not this
   // // one. They may be implemented in the future.
@@ -86,13 +109,13 @@ function startupLog ({ agentError } = {}) {
   // out.service_mapping
   // out.service_mapping_error
 
-  info('DATADOG TRACER CONFIGURATION - ' + out)
+  logger.info('DATADOG TRACER CONFIGURATION - ' + out)
   if (agentError) {
-    warn('DATADOG TRACER DIAGNOSTIC - Agent Error: ' + agentError.message)
+    logger.warn('DATADOG TRACER DIAGNOSTIC - Agent Error: ' + agentError.message)
   }
 
   config = undefined
-  pluginManager = undefined
+  instrumenter = undefined
   samplingRules = undefined
 }
 
@@ -100,8 +123,8 @@ function setStartupLogConfig (aConfig) {
   config = aConfig
 }
 
-function setStartupLogPluginManager (thePluginManager) {
-  pluginManager = thePluginManager
+function setStartupLogInstrumenter (theInstrumenter) {
+  instrumenter = theInstrumenter
 }
 
 function setSamplingRules (theRules) {
@@ -111,6 +134,6 @@ function setSamplingRules (theRules) {
 module.exports = {
   startupLog,
   setStartupLogConfig,
-  setStartupLogPluginManager,
+  setStartupLogInstrumenter,
   setSamplingRules
 }

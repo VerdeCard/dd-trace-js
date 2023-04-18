@@ -1,25 +1,34 @@
 'use strict'
 
+const opentracing = require('opentracing')
 const os = require('os')
+const Tracer = opentracing.Tracer
+const Reference = opentracing.Reference
 const Span = require('./span')
+const SpanContext = require('./span_context')
 const SpanProcessor = require('../span_processor')
+const Sampler = require('../sampler')
 const PrioritySampler = require('../priority_sampler')
 const TextMapPropagator = require('./propagation/text_map')
 const HttpPropagator = require('./propagation/http')
 const BinaryPropagator = require('./propagation/binary')
 const LogPropagator = require('./propagation/log')
+const NoopSpan = require('../noop/span')
 const formats = require('../../../../ext/formats')
 
 const log = require('../log')
+const constants = require('../constants')
 const metrics = require('../metrics')
 const getExporter = require('../exporter')
-const SpanContext = require('./span_context')
 
-const REFERENCE_CHILD_OF = 'child_of'
-const REFERENCE_FOLLOWS_FROM = 'follows_from'
+const REFERENCE_NOOP = constants.REFERENCE_NOOP
+const REFERENCE_CHILD_OF = opentracing.REFERENCE_CHILD_OF
+const REFERENCE_FOLLOWS_FROM = opentracing.REFERENCE_FOLLOWS_FROM
 
-class DatadogTracer {
+class DatadogTracer extends Tracer {
   constructor (config) {
+    super()
+
     const Exporter = getExporter(config.experimental.exporter)
 
     this._service = config.service
@@ -27,13 +36,15 @@ class DatadogTracer {
     this._env = config.env
     this._tags = config.tags
     this._logInjection = config.logInjection
+    this._analytics = config.analytics
     this._debug = config.debug
-    this._prioritySampler = new PrioritySampler(config.env, config.sampler)
+    this._internalErrors = config.experimental.internalErrors
+    this._prioritySampler = new PrioritySampler(config.env, config.experimental.sampler)
     this._exporter = new Exporter(config, this._prioritySampler)
-    this._processor = new SpanProcessor(this._exporter, this._prioritySampler, config)
+    this._processor = new SpanProcessor(this._exporter, this._prioritySampler)
     this._url = this._exporter._url
+    this._sampler = new Sampler(config.sampleRate)
     this._enableGetRumData = config.experimental.enableGetRumData
-    this._traceId128BitGenerationEnabled = config.traceId128BitGenerationEnabled
     this._propagators = {
       [formats.TEXT_MAP]: new TextMapPropagator(config),
       [formats.HTTP_HEADERS]: new HttpPropagator(config),
@@ -45,35 +56,36 @@ class DatadogTracer {
     }
   }
 
-  startSpan (name, options = {}) {
-    const parent = options.childOf
-      ? getContext(options.childOf)
-      : getParent(options.references)
+  _startSpan (name, fields) {
+    const reference = getParent(fields.references)
+    const type = reference && reference.type()
+    const parent = reference && reference.referencedContext()
+    return this._startSpanInternal(name, fields, parent, type)
+  }
+
+  _startSpanInternal (name, fields = {}, parent, type) {
+    if (parent && parent._noop) return parent._noop
+    if (!isSampled(this._sampler, parent, type)) return new NoopSpan(this, parent)
 
     const tags = {
       'service.name': this._service
     }
 
-    const span = new Span(this, this._processor, this._prioritySampler, {
-      operationName: options.operationName || name,
+    const span = new Span(this, this._processor, this._sampler, this._prioritySampler, {
+      operationName: fields.operationName || name,
       parent,
       tags,
-      startTime: options.startTime,
-      hostname: this._hostname,
-      traceId128BitGenerationEnabled: this._traceId128BitGenerationEnabled
+      startTime: fields.startTime,
+      hostname: this._hostname
     }, this._debug)
 
     span.addTags(this._tags)
-    span.addTags(options.tags)
+    span.addTags(fields.tags)
 
     return span
   }
 
-  inject (spanContext, format, carrier) {
-    if (spanContext instanceof Span) {
-      spanContext = spanContext.context()
-    }
-
+  _inject (spanContext, format, carrier) {
     try {
       this._prioritySampler.sample(spanContext)
       this._propagators[format].inject(spanContext, carrier)
@@ -81,9 +93,11 @@ class DatadogTracer {
       log.error(e)
       metrics.increment('datadog.tracer.node.inject.errors', true)
     }
+
+    return this
   }
 
-  extract (format, carrier) {
+  _extract (format, carrier) {
     try {
       return this._propagators[format].extract(carrier)
     } catch (e) {
@@ -94,36 +108,44 @@ class DatadogTracer {
   }
 }
 
-function getContext (spanContext) {
-  if (spanContext instanceof Span) {
-    spanContext = spanContext.context()
-  }
-
-  if (!(spanContext instanceof SpanContext)) {
-    spanContext = null
-  }
-
-  return spanContext
-}
-
 function getParent (references = []) {
   let parent = null
 
   for (let i = 0; i < references.length; i++) {
     const ref = references[i]
+
+    if (!(ref instanceof Reference)) {
+      log.error(() => `Expected ${ref} to be an instance of opentracing.Reference`)
+      continue
+    }
+
+    const spanContext = ref.referencedContext()
     const type = ref.type()
 
-    if (type === REFERENCE_CHILD_OF) {
-      parent = ref.referencedContext()
+    if (type !== REFERENCE_NOOP && spanContext && !(spanContext instanceof SpanContext)) {
+      log.error(() => `Expected ${spanContext} to be an instance of SpanContext`)
+      continue
+    }
+
+    if (type === REFERENCE_CHILD_OF || type === REFERENCE_NOOP) {
+      parent = ref
       break
     } else if (type === REFERENCE_FOLLOWS_FROM) {
       if (!parent) {
-        parent = ref.referencedContext()
+        parent = ref
       }
     }
   }
 
   return parent
+}
+
+function isSampled (sampler, parent, type) {
+  if (type === REFERENCE_NOOP) return false
+  if (parent && !parent._traceFlags.sampled) return false
+  if (!parent && !sampler.isSampled()) return false
+
+  return true
 }
 
 module.exports = DatadogTracer

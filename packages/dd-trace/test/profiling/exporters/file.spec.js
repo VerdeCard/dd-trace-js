@@ -1,45 +1,43 @@
 'use strict'
 
-require('../../setup/tap')
-
 const proxyquire = require('proxyquire')
 const sinon = require('sinon')
 
 describe('exporters/file', () => {
   let FileExporter
   let fs
+  let encoder
 
   beforeEach(() => {
     fs = {
       writeFile: sinon.stub().yields()
     }
 
+    encoder = {
+      encode: sinon.stub()
+    }
+
     FileExporter = proxyquire('../../../src/profiling/exporters/file', {
-      fs
+      fs,
+      '../encoders/pprof': {
+        Encoder: sinon.stub().returns(encoder)
+      }
     }).FileExporter
   })
 
-  it('should export to a file per profile type', async () => {
+  it('should export to a file per profile type', done => {
     const exporter = new FileExporter()
-    const buffer = Buffer.from('profile')
     const profiles = {
-      test: buffer
+      test: 'profile'
     }
-    await exporter.export({ profiles, end: new Date('2023-02-10T21:03:05Z') })
 
-    sinon.assert.calledOnce(fs.writeFile)
-    sinon.assert.calledWith(fs.writeFile, 'test_20230210T210305Z.pprof', buffer)
-  })
+    encoder.encode.withArgs('profile').yields(null, 'buffer')
 
-  it('should export to a file per profile type with given prefix', async () => {
-    const exporter = new FileExporter({ pprofPrefix: 'myprefix_' })
-    const buffer = Buffer.from('profile')
-    const profiles = {
-      test: buffer
-    }
-    await exporter.export({ profiles, end: new Date('2023-02-10T21:03:05Z') })
+    exporter.export({ profiles }, () => {
+      sinon.assert.calledOnce(fs.writeFile)
+      sinon.assert.calledWith(fs.writeFile, 'test.pb.gz', 'buffer')
 
-    sinon.assert.calledOnce(fs.writeFile)
-    sinon.assert.calledWith(fs.writeFile, 'myprefix_test_20230210T210305Z.pprof', buffer)
+      done()
+    })
   })
 })

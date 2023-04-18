@@ -1,6 +1,6 @@
 'use strict'
 
 module.exports = {
-  port: 3031,
-  reqs: 350
+  port: 3030,
+  reqs: 1000
 }

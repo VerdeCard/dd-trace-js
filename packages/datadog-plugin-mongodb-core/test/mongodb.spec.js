@@ -2,11 +2,12 @@
 
 const semver = require('semver')
 const agent = require('../../dd-trace/test/plugins/agent')
+const plugin = require('../src')
+
+wrapIt()
 
 const withTopologies = fn => {
-  const isOldNode = semver.satisfies(process.version, '<=12')
-  const range = isOldNode ? '>=2 <5' : '>=2' // TODO: remove when 2.x support is removed.
-  withVersions('mongodb-core', 'mongodb', range, (version, moduleName) => {
+  withVersions(plugin, 'mongodb', (version, moduleName) => {
     describe('using the default topology', () => {
       fn(async () => {
         const { MongoClient } = require(`../../../versions/${moduleName}@${version}`).get()
@@ -19,7 +20,7 @@ const withTopologies = fn => {
     })
 
     // unified topology is now the only topology and thus the default since 4.x
-    if (!semver.intersects(version, '>=4')) {
+    if (semver.intersects(version, '<4')) {
       describe('using the unified topology', () => {
         fn(async () => {
           const { MongoClient, Server } = require(`../../../versions/${moduleName}@${version}`).get()
@@ -42,7 +43,6 @@ describe('Plugin', () => {
   let collectionName
   let collection
   let db
-  let BSON
 
   describe('mongodb-core', () => {
     withTopologies(createClient => {
@@ -51,8 +51,6 @@ describe('Plugin', () => {
         tracer = require('../../dd-trace')
 
         collectionName = id().toString()
-
-        BSON = require(`../../../versions/bson@4.0.0`).get()
       })
 
       afterEach(() => {
@@ -65,7 +63,7 @@ describe('Plugin', () => {
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(async () => {
@@ -88,7 +86,6 @@ describe('Plugin', () => {
                 expect(span.meta).to.have.property('span.kind', 'client')
                 expect(span.meta).to.have.property('db.name', `test.${collectionName}`)
                 expect(span.meta).to.have.property('out.host', '127.0.0.1')
-                expect(span.meta).to.have.property('component', 'mongodb')
               })
               .then(done)
               .catch(done)
@@ -100,11 +97,9 @@ describe('Plugin', () => {
             agent
               .use(traces => {
                 const span = traces[0][0]
-                const resource = `planCacheListPlans test.$cmd`
-                const query = `{}`
+                const resource = `planCacheListPlans test.$cmd {}`
 
                 expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
               })
               .then(done)
               .catch(done)
@@ -115,15 +110,34 @@ describe('Plugin', () => {
             }, () => {})
           })
 
+          it('should sanitize the query', done => {
+            agent
+              .use(traces => {
+                const span = traces[0][0]
+                const query = '{"foo":"?","bar":{"baz":"?"}}'
+                const resource = `find test.${collectionName} ${query}`
+
+                expect(span).to.have.property('resource', resource)
+                expect(span.meta).to.have.property('mongodb.query', query)
+              })
+              .then(done)
+              .catch(done)
+
+            collection.find({
+              foo: 1,
+              bar: {
+                baz: [1, 2, 3]
+              }
+            }).toArray()
+          })
+
           it('should sanitize buffers as values and not as objects', done => {
             agent
               .use(traces => {
                 const span = traces[0][0]
-                const resource = `find test.${collectionName}`
-                const query = `{"_id":"?"}`
+                const resource = `find test.${collectionName} {"_id":"?"}`
 
                 expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
               })
               .then(done)
               .catch(done)
@@ -133,77 +147,21 @@ describe('Plugin', () => {
             }).toArray()
           })
 
-          it('should sanitize BSON binary', done => {
+          it('should sanitize BSON as values and not as objects', done => {
+            const BSON = require(`../../../versions/bson@4.0.0`).get()
+
             agent
               .use(traces => {
                 const span = traces[0][0]
-                const resource = `find test.${collectionName}`
-                const query = `{"_bin":"?"}`
+                const resource = `find test.${collectionName} {"_id":"?"}`
 
                 expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
               })
               .then(done)
               .catch(done)
 
             collection.find({
-              _bin: new BSON.Binary()
-            }).toArray()
-          })
-
-          it('should stringify BSON primitives', done => {
-            const id = '123456781234567812345678'
-
-            agent
-              .use(traces => {
-                const span = traces[0][0]
-                const resource = `find test.${collectionName}`
-                const query = `{"_id":"${id}"}`
-
-                expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
-              })
-              .then(done)
-              .catch(done)
-
-            collection.find({
-              _id: new BSON.ObjectID(id)
-            }).toArray()
-          })
-
-          it('should stringify BSON objects', done => {
-            agent
-              .use(traces => {
-                const span = traces[0][0]
-                const resource = `find test.${collectionName}`
-                const query = `{"_time":{"$timestamp":"0"}}`
-
-                expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
-              })
-              .then(done)
-              .catch(done)
-
-            collection.find({
-              _time: new BSON.Timestamp()
-            }).toArray()
-          })
-
-          it('should stringify BSON internal types', done => {
-            agent
-              .use(traces => {
-                const span = traces[0][0]
-                const resource = `find test.${collectionName}`
-                const query = `{"_id":"?"}`
-
-                expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
-              })
-              .then(done)
-              .catch(done)
-
-            collection.find({
-              _id: new BSON.MinKey()
+              _id: new BSON.ObjectID('123456781234567812345678')
             }).toArray()
           })
 
@@ -211,11 +169,9 @@ describe('Plugin', () => {
             agent
               .use(traces => {
                 const span = traces[0][0]
-                const resource = `find test.${collectionName}`
-                const query = `{"_id":"1234"}`
+                const resource = `find test.${collectionName} {"_id":"?"}`
 
                 expect(span).to.have.property('resource', resource)
-                expect(span.meta).to.have.property('mongodb.query', query)
               })
               .then(done)
               .catch(done)
@@ -227,30 +183,23 @@ describe('Plugin', () => {
           })
 
           it('should run the callback in the parent context', done => {
-            const insertPromise = collection.insertOne({ a: 1 }, {}, () => {
+            if (process.env.DD_CONTEXT_PROPAGATION === 'false') return done()
+
+            collection.insertOne({ a: 1 }, {}, () => {
               expect(tracer.scope().active()).to.be.null
               done()
             })
-            if (insertPromise && insertPromise.then) {
-              insertPromise.then(() => {
-                expect(tracer.scope().active()).to.be.null
-                done()
-              })
-            }
           })
         })
       })
 
       describe('with configuration', () => {
         before(() => {
-          return agent.load('mongodb-core', {
-            service: 'custom',
-            queryInResourceName: true
-          })
+          return agent.load('mongodb-core', { service: 'custom' })
         })
 
         after(() => {
-          return agent.close({ ritmReset: false })
+          return agent.close()
         })
 
         beforeEach(async () => {
@@ -267,23 +216,7 @@ describe('Plugin', () => {
             .then(done)
             .catch(done)
 
-          collection.insertOne({ a: 1 }, {}, () => {})
-        })
-
-        it('should include sanitized query in resource when configured', done => {
-          agent
-            .use(traces => {
-              const span = traces[0][0]
-              const resource = `find test.${collectionName} {"_bin":"?"}`
-
-              expect(span).to.have.property('resource', resource)
-            })
-            .then(done)
-            .catch(done)
-
-          collection.find({
-            _bin: new BSON.Binary()
-          }).toArray()
+          collection.insertOne({ a: 1 }, () => {})
         })
       })
     })

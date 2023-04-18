@@ -4,16 +4,13 @@ const pick = require('lodash.pick')
 const log = require('../../dd-trace/src/log')
 
 module.exports = {
-  getMethodMetadata (path, kind) {
-    const tags = {
-      path,
-      kind,
-      name: '',
-      service: '',
-      package: ''
-    }
+  addMethodTags (span, path, kind) {
+    if (typeof path !== 'string') return
 
-    if (typeof path !== 'string') return tags
+    span.addTags({
+      'grpc.method.path': path,
+      'grpc.method.kind': kind
+    })
 
     const methodParts = path.split('/')
 
@@ -23,14 +20,16 @@ module.exports = {
       const service = serviceParts.pop()
       const pkg = serviceParts.join('.')
 
-      tags.name = name
-      tags.service = service
-      tags.package = pkg
+      span.addTags({
+        'grpc.method.name': name,
+        'grpc.method.service': service,
+        'grpc.method.package': pkg
+      })
     } else {
-      tags.name = methodParts[methodParts.length - 1]
+      span.addTags({
+        'grpc.method.name': methodParts[methodParts.length - 1]
+      })
     }
-
-    return tags
   },
 
   addMetadataTags (span, metadata, filter, type) {
